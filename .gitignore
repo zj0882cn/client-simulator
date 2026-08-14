@@ -1,0 +1,11 @@
+build/
+*.o
+*.o.d
+*.a
+*.so
+wow_client
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+compile_commands.json
