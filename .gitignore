@@ -1,8 +1,12 @@
 build/
+build-win/
+build-linux/
+release/
 *.o
 *.o.d
 *.a
 *.so
+*.exe
 wow_client
 CMakeCache.txt
 CMakeFiles/
