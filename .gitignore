@@ -1,0 +1,24 @@
+# Build directories
+build/
+build-linux/
+build-win/
+build-win-new/
+
+# Compiled outputs (except release/ deliverables)
+*.o
+*.o.d
+*.a
+*.so
+!release/*.exe
+!release/*.dll
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+compile_commands.json
+
+# Other
+__pycache__/
+*.zip
