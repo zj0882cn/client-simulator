@@ -11,8 +11,8 @@ find_package(ZLIB REQUIRED)
 
 # Platform-specific settings
 if(WIN32)
-    # Windows: link ws2_32 for sockets, crypt32 for OpenSSL cert API
-    set(PLATFORM_LIBS ws2_32 crypt32 gdi32)
+    # Windows: link ws2_32 for sockets, no dl needed
+    set(PLATFORM_LIBS ws2_32)
     add_definitions(-D_WIN32_WINNT=0x0601)
 else()
     # Linux/Mac: link dl and pthread

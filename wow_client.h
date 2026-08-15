@@ -4,49 +4,11 @@
 // 不依赖 AzerothCore 库，不连接数据库
 // =============================================================================
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
-#include <fstream>
-#include <functional>
-#include <iostream>
-#include <sstream>
-#include <string>
-#include <thread>
-#include <vector>
-
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #include <windows.h>
     #pragma comment(lib, "ws2_32.lib")
-
-    // Ensure ssize_t is defined on Windows
-    #ifndef ssize_t
-        #define ssize_t int
-    #endif
-
-    #ifndef EINTR
-        #define EINTR WSAEINTR
-    #endif
-    #ifndef EAGAIN
-        #define EAGAIN WSAEAGAIN
-    #endif
-    #ifndef EWOULDBLOCK
-        #define EWOULDBLOCK WSAEWOULDBLOCK
-    #endif
-    #ifndef EINPROGRESS
-        #define EINPROGRESS WSAEINPROGRESS
-    #endif
-
-    inline std::string win_strerror(int err) {
-        char buf[256];
-        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, nullptr, err, 0, buf, sizeof(buf), nullptr);
-        return std::string(buf);
-    }
 #else
     #include <arpa/inet.h>
     #include <cerrno>
@@ -61,6 +23,19 @@
     #include <unistd.h>
 #endif
 
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
 #include <zlib.h>
 
 #include <openssl/bn.h>
@@ -79,16 +54,11 @@ using uint64 = uint64_t;
 // 跨平台辅助宏
 #ifdef _WIN32
     #define CLOSE_SOCKET(s) closesocket(s)
-    #define SOCKET_ERRNO() WSAGetLastError()
-    #define SOCKET_ERROR_MSG() win_strerror(WSAGetLastError())
+    #define SOCKET_ERROR_MSG() std::string(WSAGetLastError() == WSAETIMEDOUT ? "Connection timed out" : "Socket error")
     #define SOCKET_INVALID INVALID_SOCKET
-    #ifndef MSG_NOSIGNAL
-        #define MSG_NOSIGNAL 0
-    #endif
     using SocketType = SOCKET;
 #else
     #define CLOSE_SOCKET(s) close(s)
-    #define SOCKET_ERRNO() errno
     #define SOCKET_ERROR_MSG() std::string(strerror(errno))
     #define SOCKET_INVALID (-1)
     using SocketType = int;
@@ -162,7 +132,6 @@ namespace WoWClient
     constexpr uint16 SMSG_NEW_WORLD         = 0x003E;
     constexpr uint16 SMSG_TRANSFER_PENDING  = 0x003F;
     constexpr uint16 SMSG_TRANSFER_ABORTED = 0x0040;
-    constexpr uint16 MSG_MINIMAP_PING       = 0x01D5;
 
     // =========================================================================
     // 数据结构
@@ -573,7 +542,6 @@ namespace WoWClient
         bool SendChatMessage(const std::string& msg, uint8 channel = 0);
         bool HasPendingData(uint32 timeoutMs);
         bool RecvPacketNonBlocking(uint16& cmd, std::vector<uint8>& payload);
-        bool HandleServerPacket(uint16 cmd, const std::vector<uint8>& payload);
 
     private:
         std::string ip_;

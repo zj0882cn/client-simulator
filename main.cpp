@@ -1,11 +1,11 @@
 #include "wow_client.h"
 #include <csignal>
-#include <fstream>
-#include <sstream>
-#include <thread>
-#include <chrono>
 
 using namespace WoWClient;
+
+// =========================================================================
+// main.cpp - WoW 客户端模拟器主入口
+// =========================================================================
 
 static std::atomic<bool> g_running{true};
 
@@ -18,36 +18,24 @@ void printHelp() {
     std::cout << R"(
 WoW Standalone Client Simulator (无数据库版)
 
-用法:
-    wow_client.exe                (读取 config.ini 配置运行)
-    wow_client.exe --config <file> (指定配置文件)
-    wow_client.exe login --account <account> --password <password> [--character <name>] [--host <ip>]
-    wow_client.exe list  --account <account> --password <password> [--host <ip>]
-    wow_client.exe test  --account <account> --password <password> [--host <ip>]
+Usage:
+    ./wow_client login --account <account> --password <password> [--character <name>] [--host <ip>] [--port <port>]
+    ./wow_client list  --account <account> --password <password> [--host <ip>]
+    ./wow_client test  --account <account> --password <password> [--host <ip>]
 
-选项:
+Options:
     --account       账号用户名
     --password      密码
     --character     角色名（可选，不指定则选第一个角色）
-    --host          Auth 服务器地址 (默认: 127.0.0.1)
+    --host          Auth 服务器地址 (默认: 119.3.216.43)
     --port          Auth 服务器端口 (默认: 3724)
     --bot-target    Bot 模式目标玩家名 (可选)
-    --config        指定配置文件路径 (默认: config.ini)
 
-配置文件格式 (config.ini):
-    [auth]
-    account = your_account
-    password = your_password
-    host = 127.0.0.1
-    port = 3724
-    character = MyHero
-    bot_target = BotTarget
-    action = login   (login / list / test)
-
-示例:
-    wow_client.exe                          (从 config.ini 读取)
-    wow_client.exe login --account MYACC --password mypass --character MyHero
-    wow_client.exe --config D:\config.ini
+Examples:
+    ./wow_client login --account MYACC --password mypass --character MyHero
+    ./wow_client login --account MYACC --password mypass --host 119.3.216.43
+    ./wow_client list --account MYACC --password mypass
+    ./wow_client test --account MYACC --password mypass
 )";
 }
 
@@ -56,89 +44,18 @@ struct Args {
     std::string account;
     std::string password;
     std::string character;
-    std::string host = "127.0.0.1";
+    std::string host = "119.3.216.43";
     uint16 port = AUTH_SERVER_PORT;
     std::string botTarget;
-    std::string configFile = "config.ini";
     bool listOnly = false;
     bool testOnly = false;
 };
 
-std::string trimString(const std::string& s) {
-    size_t start = s.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) return "";
-    size_t end = s.find_last_not_of(" \t\r\n");
-    return s.substr(start, end - start + 1);
-}
-
-void loadConfig(const std::string& filename, Args& args) {
-    std::ifstream file(filename);
-    if (!file.is_open()) return;
-
-    std::string line;
-    std::string section;
-    while (std::getline(file, line)) {
-        line = trimString(line);
-        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
-
-        if (line[0] == '[' && line.back() == ']') {
-            section = line.substr(1, line.size() - 2);
-            continue;
-        }
-
-        size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-
-        std::string key = trimString(line.substr(0, eq));
-        std::string value = trimString(line.substr(eq + 1));
-
-        if (section == "auth") {
-            if (key == "account") args.account = value;
-            else if (key == "password") args.password = value;
-            else if (key == "host") args.host = value;
-            else if (key == "port") args.port = uint16(std::atoi(value.c_str()));
-            else if (key == "character") args.character = value;
-            else if (key == "bot_target") args.botTarget = value;
-            else if (key == "action") {
-                args.action = value;
-                if (value == "list") { args.listOnly = true; args.action = "list"; }
-                else if (value == "test") { args.testOnly = true; args.action = "test"; }
-                else args.action = "login";
-            }
-        }
-    }
-
-    std::cout << "[Config] Loaded config from: " << filename << "\n";
-}
-
 Args parseArgs(int argc, char** argv) {
     Args args;
-    std::string configFile;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--help" || arg == "-?") {
-            printHelp();
-            exit(0);
-        }
-        if (arg == "--config" && i + 1 < argc) {
-            configFile = argv[++i];
-            args.configFile = configFile;
-        }
-    }
-
-    if (!configFile.empty() || argc <= 2) {
-        std::string cfgPath = configFile.empty() ? args.configFile : configFile;
-        std::ifstream testFile(cfgPath);
-        if (testFile.good()) {
-            testFile.close();
-            loadConfig(cfgPath, args);
-        }
-    }
-
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--config" && i + 1 < argc) { ++i; continue; }
 
         if (arg == "login" || arg == "list" || arg == "test") {
             args.action = arg;
@@ -154,10 +71,18 @@ Args parseArgs(int argc, char** argv) {
             else if (arg == "--port" || arg == "-P") args.port = uint16(std::atoi(next.c_str()));
             else if (arg == "--bot-target" || arg == "-t") args.botTarget = next;
         }
+        else if (arg == "--help" || arg == "-?") {
+            printHelp();
+            exit(0);
+        }
     }
 
     return args;
 }
+
+// =========================================================================
+// Bot 主循环
+// =========================================================================
 
 int runLoginLoop(const Args& args) {
     std::cout << "\n========================================\n";
@@ -198,6 +123,7 @@ int runLoginLoop(const Args& args) {
         std::cout << "    - " << r.name << " (" << r.address << ":" << r.port << ")" << "\n";
     }
 
+    // Test mode: stop here
     if (args.testOnly) {
         auth.Disconnect();
         std::cout << "\n[+] Test PASSED - Auth connection and login successful!\n";
@@ -207,12 +133,6 @@ int runLoginLoop(const Args& args) {
     RealmInfo realm = realms[0];
     AuthResult authResult = auth.GetResult();
     auth.Disconnect();
-
-    // IMPORTANT: Auth Server updates session_key asynchronously.
-    // We need to wait for the database write to complete before
-    // connecting to World Server, otherwise session_key may be NULL.
-    std::cout << "[*] Waiting for session_key sync...\n";
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     // ---- Step 2: World 服务器连接 ----
     std::cout << "\n[*] Connecting to World Server " << realm.address << ":" << realm.port << "...\n";
@@ -271,6 +191,7 @@ int runLoginLoop(const Args& args) {
         return 0;
     }
 
+    // 选择角色
     std::string charName = args.character;
     if (charName.empty()) charName = chars[0].name;
 
@@ -300,27 +221,22 @@ int runLoginLoop(const Args& args) {
     world.SendActiveMover(chosen->guid);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+    // Drain initial login packets
     std::cout << "[*] Draining login packets...\n";
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
-    int drainedPackets = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         uint16 cmd;
         std::vector<uint8> payload;
         if (!world.RecvPacketNonBlocking(cmd, payload)) break;
-        drainedPackets++;
         if (cmd == SMSG_LOGOUT_COMPLETE) {
             std::cerr << "[-] Kicked during login\n";
             return 1;
         }
-        if (drainedPackets <= 5) {
-            std::cerr << "[Drain] Got packet cmd=0x" << std::hex << cmd << std::dec 
-                      << " size=" << payload.size() << "\n";
-        }
     }
-    std::cout << "[*] Drained " << drainedPackets << " packets\n";
 
     std::cout << "\n[+] " << chosen->name << " entered the world!\n";
 
+    // ---- Bot 模式 ----
     if (!args.botTarget.empty()) {
         std::cout << "[*] Setting bot mode target: " << args.botTarget << "\n";
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -329,12 +245,9 @@ int runLoginLoop(const Args& args) {
         world.SendChatMessage("/bot list");
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
     } else {
-        std::cout << "[*] Sending chat message...\n";
         world.SendChatMessage("/bot list");
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
-
-    std::cout << "[*] About to start keep-alive loop...\n";
 
     // ---- Step 5: 保活循环 ----
     std::cout << "\n[*] Starting keep-alive loop (Ctrl+C to stop)...\n\n";
@@ -342,39 +255,19 @@ int runLoginLoop(const Args& args) {
     uint32 pingSeq = 0;
     int pingFailCount = 0;
     auto lastPing = std::chrono::steady_clock::now();
-    auto lastRecvData = std::chrono::steady_clock::now();
-    auto lastStatusLog = std::chrono::steady_clock::now();
-    uint64 totalPacketsReceived = 0;
-    uint64 startTime = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
 
     while (g_running && world.IsConnected()) {
         uint16 cmd;
         std::vector<uint8> payload;
-        bool received = false;
-
         while (world.RecvPacketNonBlocking(cmd, payload)) {
-            received = true;
-            totalPacketsReceived++;
-            lastRecvData = std::chrono::steady_clock::now();
-
             if (cmd == SMSG_LOGOUT_COMPLETE) {
                 std::cout << "\n[*] Logout complete, exiting...\n";
-                std::cout << "[*] Session stats: " << totalPacketsReceived
-                          << " packets received\n";
                 return 0;
             }
-            // Handle server packets (respond to ping, etc.)
-            world.HandleServerPacket(cmd, payload);
         }
 
         if (!world.IsConnected()) {
-            auto now = std::chrono::steady_clock::now();
-            auto secSinceRecv = std::chrono::duration_cast<std::chrono::seconds>(
-                now - lastRecvData).count();
-            std::cerr << "[-] Connection lost! Last data received " << secSinceRecv
-                      << " seconds ago\n";
-            std::cerr << "[-] Total packets received: " << totalPacketsReceived << "\n";
+            std::cerr << "[-] Connection lost\n";
             break;
         }
 
@@ -391,44 +284,13 @@ int runLoginLoop(const Args& args) {
             } else {
                 pingFailCount++;
                 std::cerr << "[-] Ping failed (" << pingFailCount << "/3)\n";
-                if (pingFailCount >= 3) {
-                    std::cerr << "[-] Too many ping failures, disconnecting\n";
-                    break;
-                }
+                if (pingFailCount >= 3) break;
             }
             lastPing = now;
         }
 
-        // Status log every 5 minutes
-        auto statusElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - lastStatusLog);
-        if (statusElapsed.count() >= 300000) { // 5 minutes
-            auto secSinceRecv = std::chrono::duration_cast<std::chrono::seconds>(
-                now - lastRecvData).count();
-            uint64 currentTime = std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            uint64 uptime = currentTime - startTime;
-            auto timeStr = std::chrono::system_clock::to_time_t(
-                std::chrono::system_clock::now());
-            char timeBuf[64];
-            strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", localtime(&timeStr));
-
-            std::cout << "[" << timeBuf << "] Status: uptime=" << uptime
-                      << "s, packets=" << totalPacketsReceived
-                      << ", last_data=" << secSinceRecv << "s ago"
-                      << ", connected=" << (world.IsConnected() ? "yes" : "no") << "\n";
-            lastStatusLog = now;
-        }
-
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-
-    // Print final stats
-    auto endTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    char timeBuf[64];
-    strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", localtime(&endTime));
-    std::cout << "\n[" << timeBuf << "] Final stats: " << totalPacketsReceived
-              << " packets received during session\n";
 
     world.Disconnect();
     std::cout << "\n[+] Client disconnected. Goodbye!\n";
@@ -440,6 +302,7 @@ int main(int argc, char** argv) {
     signal(SIGTERM, signalHandler);
 
 #ifdef _WIN32
+    // Initialize Winsock
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::cerr << "WSAStartup failed\n";
@@ -448,23 +311,17 @@ int main(int argc, char** argv) {
 #endif
 
     if (argc < 2) {
-        std::ifstream testFile("config.ini");
-        if (testFile.good()) {
-            testFile.close();
-            std::cout << "[Info] No arguments, using config.ini\n\n";
-        } else {
-            printHelp();
+        printHelp();
 #ifdef _WIN32
-            WSACleanup();
+        WSACleanup();
 #endif
-            return 1;
-        }
+        return 1;
     }
 
     Args args = parseArgs(argc, argv);
 
     if (args.account.empty() || args.password.empty()) {
-        std::cerr << "Error: --account and --password are required (or set in config.ini)\n";
+        std::cerr << "Error: --account and --password are required\n";
         printHelp();
 #ifdef _WIN32
         WSACleanup();
