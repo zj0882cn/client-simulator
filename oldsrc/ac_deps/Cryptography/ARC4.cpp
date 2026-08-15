@@ -42,8 +42,6 @@ void Acore::Crypto::ARC4::Init(uint8 const* seed, std::size_t len)
 void Acore::Crypto::ARC4::UpdateData(uint8* data, std::size_t len)
 {
     int outlen = 0;
-    int result1 = EVP_EncryptUpdate(_ctx, data, &outlen, data, len);
-    ASSERT(result1 == 1);
-    int result2 = EVP_EncryptFinal_ex(_ctx, data, &outlen);
-    ASSERT(result2 == 1);
+    int result = EVP_EncryptUpdate(_ctx, data, &outlen, data, len);
+    ASSERT(result == 1);
 }

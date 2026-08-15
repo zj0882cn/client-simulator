@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -618,15 +619,33 @@ bool WorldSocket::RecvCharacterList(std::vector<CharacterInfo>& chars)
 {
     chars.clear();
 
+    // Drain any pending packets that arrived after SMSG_AUTH_RESPONSE
+    // (server may push SMSG_ADDON_INFO, SMSG_CLIENTCACHE_VERSION, etc.)
+    {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            uint16 cmd;
+            std::vector<uint8> body;
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(_fd, &fds);
+            struct timeval tv{0, 50000};
+            int ret = select(_fd + 1, &fds, nullptr, nullptr, &tv);
+            if (ret <= 0) break;
+            if (!RecvPacket(cmd, body)) break;
+            std::cerr << "[WorldSocket] Drain: got cmd=0x" << std::hex << cmd
+                      << std::dec << " (" << body.size() << " bytes)\n";
+        }
+    }
+
     // 发送 CMSG_CHAR_ENUM
     SendPacket(Opcodes::CMSG_CHAR_ENUM, {});
 
-    // 服务端在 SMSG_AUTH_RESPONSE 之后、SMSG_CHAR_ENUM 之前会推送:
-    // SMSG_ADDON_INFO (0x2EF), SMSG_CLIENTCACHE_VERSION (0x4AB), SMSG_TUTORIAL_FLAGS (0x0FD)
-    // 先排空这些中间包，再接收 SMSG_CHAR_ENUM
+    // 服务端在 CMSG_CHAR_ENUM 之后可能推送额外包，最多读 10 个
     uint16 cmd;
     std::vector<uint8> body;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 10; ++i)
     {
         if (!RecvPacket(cmd, body))
         {
@@ -673,11 +692,15 @@ bool WorldSocket::RecvCharacterList(std::vector<CharacterInfo>& chars)
         pos += 8;
 
         // 读取 name (null-terminated string)
-        while (pos < body.size() && body[pos] != 0)
-            ci.name += (char)body[pos++];
-        pos++; // skip null
+        size_t nameEnd = body.size();
+        for (size_t j = pos; j < body.size(); ++j)
+        {
+            if (body[j] == 0) { nameEnd = j; break; }
+        }
+        ci.name.assign((char*)body.data() + pos, nameEnd - pos);
+        pos = nameEnd + 1;
 
-        if (pos + 7 > body.size()) break; // race(1)+class(1)+gender(1)+skin(1)+face(1)+hairStyle(1)+hairColor(1)+facialHair(1)
+        if (pos + 7 > body.size()) break;
 
         ci.race   = body[pos++];
         ci.clazz  = body[pos++];
