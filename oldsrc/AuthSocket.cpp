@@ -175,8 +175,9 @@ namespace ClientSimulator
         // Platform "x86\0"
         memcpy(p, "x86", 3); p[3] = 0; p += 4;
 
-        // OS "Lin\0"
-        memcpy(p, "Lin", 3); p[3] = 0; p += 4;
+        // OS field: AzerothCore reverses the 4 bytes before storing in DB.
+        // We want "Win" in DB, so we send "niW\0" (reversed "Win\0").
+        memcpy(p, "niW", 3); p[3] = 0; p += 4;
 
         // Country "enUS"
         memcpy(p, "enUS", 4); p += 4;
