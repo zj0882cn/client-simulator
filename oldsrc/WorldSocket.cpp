@@ -549,71 +549,79 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
               << std::hex << int(rawHeader[0]) << " " << int(rawHeader[1]) << " "
               << int(rawHeader[2]) << " " << int(rawHeader[3]) << std::dec << "\n";
 
-    uint16 cmd;
-    std::vector<uint8> body;
+    // 第一步: 检查是否为未加密的 SMSG_AUTH_RESPONSE（仅当 result==0 时可能）
+    // 未加密响应仅在 AUTH_OK 时出现（极少数情况）
+    uint16 sizeRaw = readU16BE(rawHeader);
+    uint16 cmdRaw = (uint16(rawHeader[2]) | (uint16(rawHeader[3]) << 8));
 
-    // Step 1: Try unencrypted interpretation first
+    // 未加密 SMSG_AUTH_RESPONSE: opcode=0x1C8 (456), size 至少 3 字节 (2 cmd + 1 result)
+    if (cmdRaw == Opcodes::SMSG_AUTH_RESPONSE && sizeRaw >= 3 && sizeRaw <= 20)
     {
-        uint8 hdr[4];
-        memcpy(hdr, rawHeader, 4);
-        uint16 sizeRaw = readU16BE(hdr);
-        uint16 cmdRaw = (uint16(hdr[2]) | (uint16(hdr[3]) << 8));
-
-        if (cmdRaw == Opcodes::SMSG_AUTH_RESPONSE)
+        size_t bodyLen = sizeRaw - sizeof(uint16);
+        std::vector<uint8> body;
+        if (bodyLen > 0)
         {
-            size_t bodyLen = (sizeRaw >= sizeof(uint16)) ? (sizeRaw - sizeof(uint16)) : 0;
-            if (bodyLen > 0)
-            {
-                body.resize(bodyLen);
-                if (!ReadExact(body.data(), bodyLen))
-                    return false;
-            }
-            result = body.empty() ? 0 : body[0];
-
-            if (result == 0) // AUTH_OK unlikely unencrypted, but handle
-                InitAuthCrypt(_srpSessionKey);
+            body.resize(bodyLen);
+            if (!ReadExact(body.data(), bodyLen))
+                return false;
+        }
+        result = body.empty() ? 0 : body[0];
+        if (result == 0)
+        {
+            InitAuthCrypt(_srpSessionKey);
             return true;
         }
+        // result != 0 且未加密：不可能，因为只有 AUTH_OK 才未加密
+        return false;
     }
 
-    // Step 2: Initialize encryption and try decrypted
+    // 第二步: 初始化加密，解密响应
+    // 注意：不能先读 body，因为 body 是加密的，需要先初始化加密状态
     InitAuthCrypt(_srpSessionKey);
 
-    {
-        uint8 hdr[4];
-        memcpy(hdr, rawHeader, 4);
-        _recvDecrypt.UpdateData(hdr, 4);
-        uint16 sizeRaw = readU16BE(hdr);
-        cmd = (uint16(hdr[2]) | (uint16(hdr[3]) << 8));
+    uint8 hdr[4];
+    memcpy(hdr, rawHeader, 4);
+    _recvDecrypt.UpdateData(hdr, 4);
+    uint16 sizeDec = readU16BE(hdr);
+    uint16 cmdDec = (uint16(hdr[2]) | (uint16(hdr[3]) << 8));
 
-        if (cmd == Opcodes::SMSG_AUTH_RESPONSE)
-        {
-            size_t bodyLen = (sizeRaw >= sizeof(uint16)) ? (sizeRaw - sizeof(uint16)) : 0;
-            if (bodyLen > 0)
-            {
-                body.resize(bodyLen);
-                if (!ReadExact(body.data(), bodyLen))
-                    return false;
-                _recvDecrypt.UpdateData(body.data(), bodyLen);
-            }
-            result = body.empty() ? 0 : body[0];
-            return true;
-        }
+    std::cerr << "[WorldSocket] decrypted response: size=" << sizeDec
+              << " cmd=0x" << std::hex << cmdDec << std::dec << "\n";
+
+    if (cmdDec != Opcodes::SMSG_AUTH_RESPONSE)
+    {
+        std::cerr << "[WorldSocket] Expected SMSG_AUTH_RESPONSE (0x1C8), got 0x"
+                  << std::hex << cmdDec << std::dec << "\n";
+        return false;
     }
 
-    std::cerr << "[WorldSocket] Expected SMSG_AUTH_RESPONSE, got 0x"
-              << std::hex << cmd << std::dec << "\n";
-    return false;
+    size_t bodyLen = (sizeDec >= sizeof(uint16)) ? (sizeDec - sizeof(uint16)) : 0;
+    std::vector<uint8> body;
+    if (bodyLen > 0)
+    {
+        body.resize(bodyLen);
+        if (!ReadExact(body.data(), bodyLen))
+            return false;
+        _recvDecrypt.UpdateData(body.data(), bodyLen);
+    }
+    result = body.empty() ? 0 : body[0];
+
+    std::cerr << "[WorldSocket] auth result=" << int(result) << "\n";
+    return true;
 }
 
 bool WorldSocket::RecvCharacterList(std::vector<CharacterInfo>& chars)
 {
     chars.clear();
 
+    std::cerr << "[WorldSocket] Entering RecvCharacterList, cryptInitialized="
+              << _cryptInitialized << "\n";
+
     // Drain any pending packets that arrived after SMSG_AUTH_RESPONSE
     // (server may push SMSG_ADDON_INFO, SMSG_CLIENTCACHE_VERSION, etc.)
     {
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+        int drainedCount = 0;
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
         while (std::chrono::steady_clock::now() < deadline)
         {
             uint16 cmd;
@@ -621,16 +629,23 @@ bool WorldSocket::RecvCharacterList(std::vector<CharacterInfo>& chars)
             fd_set fds;
             FD_ZERO(&fds);
             FD_SET(_fd, &fds);
-            struct timeval tv{0, 50000};
+            struct timeval tv{0, 20000};
             int ret = select(_fd + 1, &fds, nullptr, nullptr, &tv);
             if (ret <= 0) break;
-            if (!RecvPacket(cmd, body)) break;
+            if (!RecvPacket(cmd, body))
+            {
+                std::cerr << "[WorldSocket] Drain: RecvPacket failed\n";
+                break;
+            }
             std::cerr << "[WorldSocket] Drain: got cmd=0x" << std::hex << cmd
                       << std::dec << " (" << body.size() << " bytes)\n";
+            drainedCount++;
         }
+        std::cerr << "[WorldSocket] Drain complete: " << drainedCount << " packets drained\n";
     }
 
     // 发送 CMSG_CHAR_ENUM
+    std::cerr << "[WorldSocket] Sending CMSG_CHAR_ENUM...\n";
     SendPacket(Opcodes::CMSG_CHAR_ENUM, {});
 
     // 服务端在 CMSG_CHAR_ENUM 之后可能推送额外包，最多读 10 个
@@ -638,11 +653,14 @@ bool WorldSocket::RecvCharacterList(std::vector<CharacterInfo>& chars)
     std::vector<uint8> body;
     for (int i = 0; i < 10; ++i)
     {
+        std::cerr << "[WorldSocket] Waiting for packet " << (i+1) << "...\n";
         if (!RecvPacket(cmd, body))
         {
             std::cerr << "[WorldSocket] Failed reading packet after CMSG_CHAR_ENUM\n";
             return false;
         }
+        std::cerr << "[WorldSocket] Packet " << (i+1) << ": cmd=0x" << std::hex
+                  << cmd << std::dec << " (" << body.size() << " bytes)\n";
         if (cmd == Opcodes::SMSG_CHAR_ENUM)
             break; // 找到角色列表
         std::cerr << "[WorldSocket] Drained intermediate packet 0x"
@@ -651,7 +669,7 @@ bool WorldSocket::RecvCharacterList(std::vector<CharacterInfo>& chars)
 
     if (cmd != Opcodes::SMSG_CHAR_ENUM)
     {
-        std::cerr << "[WorldSocket] Expected SMSG_CHAR_ENUM, got 0x"
+        std::cerr << "[WorldSocket] Expected SMSG_CHAR_ENUM (0x3B), got 0x"
                   << std::hex << cmd << std::dec << "\n";
         return false;
     }
