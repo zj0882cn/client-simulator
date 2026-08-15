@@ -619,9 +619,12 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
     result = 255;
     billingFlags = 0;
 
-    // AzerothCore 服务端在发送 SMSG_AUTH_RESPONSE 时会加密包头
-    // （包体不加密）。我们必须在读取前初始化加密以正确解密包头。
-    InitAuthCrypt(_srpSessionKey);
+    // AzerothCore 服务端逻辑（参考 WorldSocket::HandleAuthSession）：
+    //   - 错误响应（AUTH_REJECT 等）在加密初始化前发送 → 明文
+    //   - 成功响应（AUTH_OK）也在加密初始化前发送 → 明文
+    //   - 只有后续包（SMSG_ADDON_INFO 等）才是加密的
+    // 因此 SMSG_AUTH_RESPONSE 应该用明文读取。
+    // 但为了兼容不同版本的服务端，我们同时支持两种模式。
 
     uint8 rawHeader[4];
     if (!ReadExact(rawHeader, 4))
@@ -630,11 +633,63 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
         return false;
     }
 
-    // 用接收端 ARC4 密钥解密包头
-    _recvDecrypt.UpdateData(rawHeader, 4);
+    // ── 先尝试明文模式 ──
+    uint16 sizePlain = readU16BE(rawHeader);
+    uint16 cmdPlain  = uint16(rawHeader[2]) | (uint16(rawHeader[3]) << 8);
 
-    uint16 size = readU16BE(rawHeader);
-    uint16 cmd  = uint16(rawHeader[2]) | (uint16(rawHeader[3]) << 8);
+    std::cerr << "[WorldSocket] raw auth header: ";
+    for (int i = 0; i < 4; ++i)
+        std::cerr << std::hex << int(rawHeader[i]) << " ";
+    std::cerr << std::dec << "\n";
+    std::cerr << "[WorldSocket] plaintext try: cmd=0x" << std::hex << cmdPlain
+              << " size=" << sizePlain << std::dec << "\n";
+
+    if (cmdPlain == Opcodes::SMSG_AUTH_RESPONSE && sizePlain >= sizeof(uint16))
+    {
+        size_t bodyLen = sizePlain - sizeof(uint16);
+        std::vector<uint8> body;
+        if (bodyLen > 0)
+        {
+            body.resize(bodyLen);
+            if (!ReadExact(body.data(), bodyLen))
+                return false;
+
+            std::cerr << "[WorldSocket] auth body (" << bodyLen << " bytes): ";
+            for (size_t i = 0; i < std::min(bodyLen, size_t(32)); ++i)
+                std::cerr << std::hex << int(body[i]) << " ";
+            if (bodyLen > 32) std::cerr << "...";
+            std::cerr << std::dec << "\n";
+        }
+
+        result = body.empty() ? 0 : body[0];
+        std::cerr << "[WorldSocket] auth result=" << int(result)
+                  << " (" << GetAuthResultName(result) << ") [plaintext]\n";
+
+        if (result != 0)
+        {
+            std::cerr << "[WorldSocket] Auth rejected: code " << int(result)
+                      << " — " << GetAuthResultName(result) << "\n";
+            return false;
+        }
+
+        // 成功：初始化加密（后续包会是加密的）
+        InitAuthCrypt(_srpSessionKey);
+        std::cout << "[WorldSocket] Auth response OK (plaintext)\n";
+        return true;
+    }
+
+    // ── 明文不匹配 → 回退到加密模式 ──
+    std::cerr << "[WorldSocket] Plaintext didn't match SMSG_AUTH_RESPONSE, "
+              << "trying decryption...\n";
+
+    InitAuthCrypt(_srpSessionKey);
+
+    uint8 decHeader[4];
+    memcpy(decHeader, rawHeader, 4);
+    _recvDecrypt.UpdateData(decHeader, 4);
+
+    uint16 size = readU16BE(decHeader);
+    uint16 cmd  = uint16(decHeader[2]) | (uint16(decHeader[3]) << 8);
 
     std::cerr << "[WorldSocket] decrypted auth response: cmd=0x"
               << std::hex << cmd << " size=" << size << std::dec << "\n";
@@ -646,7 +701,6 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
         return false;
     }
 
-    // 包体是明文 — AzerothCore 只加密包头
     size_t bodyLen = (size >= sizeof(uint16)) ? (size - sizeof(uint16)) : 0;
     std::vector<uint8> body;
     if (bodyLen > 0)
@@ -668,17 +722,16 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
 
     result = body.empty() ? 0 : body[0];
     std::cerr << "[WorldSocket] auth result=" << int(result)
-              << " (" << GetAuthResultName(result) << ")\n";
+              << " (" << GetAuthResultName(result) << ") [encrypted]\n";
 
     if (result != 0)
     {
         std::cerr << "[WorldSocket] Auth rejected: code " << int(result)
                   << " — " << GetAuthResultName(result) << "\n";
-        std::cerr << "[WorldSocket] Check server logs for [WorldAuth] messages.\n";
         return false;
     }
 
-    std::cout << "[WorldSocket] Auth response OK\n";
+    std::cout << "[WorldSocket] Auth response OK (encrypted)\n";
     return true;
 }
 
