@@ -565,14 +565,62 @@ bool WorldSocket::SendAuthSession(AuthResult const& auth, std::string const& use
     return true;
 }
 
+static char const* GetAuthResultName(uint8 code)
+{
+    switch (code)
+    {
+        case 0:  return "AUTH_OK";
+        case 1:  return "AUTH_FAIL — 账号/密码错误";
+        case 2:  return "AUTH_REJECT — 被封禁";
+        case 3:  return "AUTH_BANNED — 永久封禁";
+        case 4:  return "AUTH_ALREADYONLINE — 已在线";
+        case 5:  return "AUTH_SUSPENDED — 暂停";
+        case 6:  return "AUTH_NOACCESS — 无访问权限";
+        case 7:  return "AUTH_SUCCESS — 成功";
+        case 8:  return "AUTH_FAIL — 失败";
+        case 9:  return "AUTH_FAIL — 版本号过低";
+        case 10: return "AUTH_DISCONNECT — 断开连接";
+        case 11: return "AUTH_FAIL — 版本号过高";
+        case 12: return "AUTH_VERSION_NOT_SUPPORTED — 版本不支持";
+        case 14: return "AUTH_REJECT — 世界服务器关闭 / Warden OS 检查失败";
+        case 15: return "AUTH_FAIL — 摘要校验失败 / IP 锁定 / 国家锁定";
+        case 16: return "REALM_LIST_REALM_NOT_FOUND — RealmID 不匹配";
+        case 17: return "AUTH_DISABLED — 账号禁用";
+        case 18: return "AUTH_CONNECTED — 已连接";
+        case 19: return "AUTH_CHALLENGE — 挑战";
+        case 20: return "AUTH_SURVEY — 调查问卷";
+        case 21: return "AUTH_DISCONNECTED — 已断开";
+        case 23: return "AUTH_FAILED — 无可用服务器";
+        case 24: return "AUTH_FAILED — 关闭";
+        case 25: return "AUTH_SUSPENDED — 被封禁";
+        case 26: return "AUTH_NOT_CONNECTED — 未连接";
+        case 27: return "AUTH_REJECT — Warden 检查失败";
+        case 28: return "AUTH_UNAVAILABLE — 安全等级不足";
+        case 29: return "AUTH_FAIL — 令牌无效";
+        case 30: return "AUTH_INVALID_PROOF — 证明无效";
+        case 31: return "AUTH_NO_HIT — 无命中";
+        case 32: return "AUTH_INVALID_PROOF — 证明无效";
+        case 33: return "AUTH_INVALID_PROOF — 证明无效";
+        case 34: return "AUTH_INVALID_PROOF — 证明无效";
+        case 35: return "AUTH_INVALID_PROOF — 证明无效";
+        case 36: return "AUTH_INVALID_PROOF — 证明无效";
+        case 37: return "AUTH_INVALID_PROOF — 证明无效";
+        case 38: return "AUTH_INVALID_PROOF — 证明无效";
+        case 39: return "AUTH_INVALID_PROOF — 证明无效";
+        case 40: return "AUTH_INVALID_PROOF — 证明无效";
+        case 41: return "AUTH_INVALID_PROOF — 证明无效";
+        case 42: return "AUTH_INVALID_PROOF — 证明无效";
+        default: return "未知错误码";
+    }
+}
+
 bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
 {
     result = 255;
     billingFlags = 0;
 
-    // The server response (SMSG_AUTH_RESPONSE) arrives as a 4-byte header + body.
-    // AzerothCore encrypts ONLY the header (ARC4), never the body.
-    // We must init encryption BEFORE reading so we can decrypt the header.
+    // AzerothCore 服务端在发送 SMSG_AUTH_RESPONSE 时会加密包头
+    // （包体不加密）。我们必须在读取前初始化加密以正确解密包头。
     InitAuthCrypt(_srpSessionKey);
 
     uint8 rawHeader[4];
@@ -582,7 +630,7 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
         return false;
     }
 
-    // Decrypt the header with the receive ARC4 key
+    // 用接收端 ARC4 密钥解密包头
     _recvDecrypt.UpdateData(rawHeader, 4);
 
     uint16 size = readU16BE(rawHeader);
@@ -598,7 +646,7 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
         return false;
     }
 
-    // Body is plaintext — only the header was encrypted
+    // 包体是明文 — AzerothCore 只加密包头
     size_t bodyLen = (size >= sizeof(uint16)) ? (size - sizeof(uint16)) : 0;
     std::vector<uint8> body;
     if (bodyLen > 0)
@@ -619,14 +667,18 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
     }
 
     result = body.empty() ? 0 : body[0];
-    std::cerr << "[WorldSocket] auth result=" << int(result) << "\n";
+    std::cerr << "[WorldSocket] auth result=" << int(result)
+              << " (" << GetAuthResultName(result) << ")\n";
 
     if (result != 0)
     {
-        std::cerr << "[WorldSocket] Auth rejected with code " << int(result) << "\n";
+        std::cerr << "[WorldSocket] Auth rejected: code " << int(result)
+                  << " — " << GetAuthResultName(result) << "\n";
+        std::cerr << "[WorldSocket] Check server logs for [WorldAuth] messages.\n";
         return false;
     }
 
+    std::cout << "[WorldSocket] Auth response OK\n";
     return true;
 }
 
