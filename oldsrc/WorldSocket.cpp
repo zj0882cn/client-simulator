@@ -352,36 +352,25 @@ void WorldSocket::InitAuthCrypt(std::vector<uint8> const& sessionKey)
 bool WorldSocket::SendPacket(uint16 cmd, std::vector<uint8> const& payload)
 {
     // Client→Server header: uint16 size(BE) + uint32 cmd(LE) = 6 bytes
-    // size = sizeof(cmd) + payload_size（不包含 size 自身，服务端会再减去 cmd 长度）
+    // size = sizeof(cmd) + payload_size
     uint16 payloadSize = uint16(payload.size());
     uint8 header[6];
     header[0] = uint8((sizeof(uint32) + payloadSize) >> 8);
     header[1] = uint8(sizeof(uint32) + payloadSize);
     writeU32LE(header + 2, cmd);
 
+    // Build full packet: header + body
+    std::vector<uint8> packet;
+    packet.reserve(6 + payload.size());
+    packet.insert(packet.end(), header, header + 6);
+    packet.insert(packet.end(), payload.begin(), payload.end());
+
     if (_cryptInitialized)
     {
-        // 加密 header (前 6 字节，对应服务端解密流程)
-        uint8 cryptedHeader[6];
-        memcpy(cryptedHeader, header, 6);
-        _sendEncrypt.UpdateData(cryptedHeader, 6);
-
-        if (!WriteAll(cryptedHeader, 6))
-            return false;
-    }
-    else
-    {
-        if (!WriteAll(header, 6))
-            return false;
+        _sendEncrypt.UpdateData(packet.data(), packet.size());
     }
 
-    if (!payload.empty())
-    {
-        if (!WriteAll(payload.data(), payload.size()))
-            return false;
-    }
-
-    return true;
+    return WriteAll(packet.data(), packet.size());
 }
 
 bool WorldSocket::RecvPacket(uint16& cmd, std::vector<uint8>& payload)
@@ -414,6 +403,9 @@ bool WorldSocket::RecvPacket(uint16& cmd, std::vector<uint8>& payload)
     payload.resize(payloadLen);
     if (!ReadExact(payload.data(), payloadLen))
         return false;
+
+    if (_cryptInitialized && payloadLen > 0)
+        _recvDecrypt.UpdateData(payload.data(), payloadLen);
 
     return true;
 }
@@ -602,10 +594,9 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
                 body.resize(bodyLen);
                 if (!ReadExact(body.data(), bodyLen))
                     return false;
-                // Body is NOT encrypted by server (only header is encrypted)
+                _recvDecrypt.UpdateData(body.data(), bodyLen);
             }
             result = body.empty() ? 0 : body[0];
-            // Encryption already initialized above
             return true;
         }
     }
