@@ -508,7 +508,7 @@ bool WorldSocket::SendAuthSession(AuthResult const& auth, std::string const& use
 
     uint32 build = 12340;
     uint32 serverId = 0;
-    uint32 loginServerType = 0; // GRUNT
+    uint8 loginServerType = 0; // GRUNT (1 byte!)
     uint32 regionId = 2;   // US
     uint32 battlegroupId = 1;
     uint64 dosResponse = 0;
@@ -525,12 +525,24 @@ bool WorldSocket::SendAuthSession(AuthResult const& auth, std::string const& use
         payload.insert(payload.end(), buf, buf + 8);
     };
 
-    payload.reserve(4 + 4 + normUser.size() + 1 + 4 + 4 + 4 + 4 + 1 + 8 + 20 + 4);
+    // WoW 3.3.5a CMSG_AUTH_SESSION format (matching server-side):
+    //   uint32  build
+    //   uint32  loginServerID
+    //   string  accountName (null-terminated)
+    //   uint8   loginServerType
+    //   uint8   localChallenge[4]  (client seed, raw bytes!)
+    //   uint32  regionID
+    //   uint32  battlegroupID
+    //   uint8   realmID
+    //   uint64  dosResponse
+    //   uint8   digest[20]
+    //   uint8   addonInfo[...]
+    payload.reserve(4 + 4 + normUser.size() + 1 + 1 + 4 + 4 + 4 + 1 + 8 + 20 + 4);
     pushU32(build);
     pushU32(serverId);
     payload.insert(payload.end(), normUser.begin(), normUser.end());
     payload.push_back(0);
-    pushU32(loginServerType);
+    payload.push_back(loginServerType);
     payload.insert(payload.end(), _clientSeed, _clientSeed + 4);
     pushU32(regionId);
     pushU32(battlegroupId);
