@@ -570,9 +570,13 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
     result = 255;
     billingFlags = 0;
 
-    // AzerothCore server sends SMSG_AUTH_RESPONSE UNENCRYPTED,
-    // then initializes AuthCrypt AFTER flushing the response.
-    // So we MUST read this packet as plaintext, regardless of success/failure.
+    // Read the raw 4-byte response header.
+    // The server may send SMSG_AUTH_RESPONSE either encrypted or unencrypted
+    // depending on its version/configuration. We handle both cases:
+    //   1) If plaintext header matches → read body as plaintext, then Init encryption.
+    //   2) If plaintext header doesn't match → Init encryption first, decrypt header,
+    //      then read body as plaintext.
+    // In both cases ONLY the header is encrypted/decrypted (AzerothCore design).
     uint8 rawHeader[4];
     if (!ReadExact(rawHeader, 4))
     {
@@ -587,44 +591,77 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
     uint16 sizeRaw = readU16BE(rawHeader);
     uint16 cmdRaw = (uint16(rawHeader[2]) | (uint16(rawHeader[3]) << 8));
 
-    // Sanity check: unencrypted SMSG_AUTH_RESPONSE should have opcode 0x1EE
-    if (cmdRaw != Opcodes::SMSG_AUTH_RESPONSE)
+    // ── Case 1: plaintext SMSG_AUTH_RESPONSE ──
+    if (cmdRaw == Opcodes::SMSG_AUTH_RESPONSE && sizeRaw >= sizeof(uint16))
+    {
+        size_t bodyLen = sizeRaw - sizeof(uint16);
+        std::vector<uint8> body;
+        if (bodyLen > 0)
+        {
+            body.resize(bodyLen);
+            if (!ReadExact(body.data(), bodyLen))
+                return false;
+        }
+        result = body.empty() ? 0 : body[0];
+        std::cerr << "[WorldSocket] auth result=" << int(result) << " (unencrypted)\n";
+
+        if (result != 0)
+        {
+            std::cerr << "[WorldSocket] Auth rejected with code " << int(result) << "\n";
+            return false;
+        }
+
+        // Init encryption AFTER consuming the unencrypted success response
+        InitAuthCrypt(_srpSessionKey);
+        return true;
+    }
+
+    // ── Case 2: encrypted SMSG_AUTH_RESPONSE ──
+    // The header is ARC4-encrypted; initialize decryption first, then decrypt.
+    InitAuthCrypt(_srpSessionKey);
+
+    uint8 decHdr[4];
+    memcpy(decHdr, rawHeader, 4);
+    _recvDecrypt.UpdateData(decHdr, 4);
+
+    uint16 sizeDec = readU16BE(decHdr);
+    uint16 cmdDec = (uint16(decHdr[2]) | (uint16(decHdr[3]) << 8));
+
+    std::cerr << "[WorldSocket] decrypted response: size=" << sizeDec
+              << " cmd=0x" << std::hex << cmdDec << std::dec << "\n";
+
+    if (cmdDec != Opcodes::SMSG_AUTH_RESPONSE)
     {
         std::cerr << "[WorldSocket] Expected SMSG_AUTH_RESPONSE (0x1EE), got 0x"
-                  << std::hex << cmdRaw << std::dec << " (unencrypted read)\n";
+                  << std::hex << cmdDec << std::dec << " (encrypted read)\n";
         return false;
     }
 
-    // Read body (plaintext)
-    size_t bodyLen = (sizeRaw >= sizeof(uint16)) ? (sizeRaw - sizeof(uint16)) : 0;
+    // Body is NOT encrypted — only headers are encrypted in AzerothCore
+    size_t bodyLen = (sizeDec >= sizeof(uint16)) ? (sizeDec - sizeof(uint16)) : 0;
     std::vector<uint8> body;
     if (bodyLen > 0)
     {
         body.resize(bodyLen);
         if (!ReadExact(body.data(), bodyLen))
             return false;
-        
-        std::cerr << "[WorldSocket] decrypted body (" << bodyLen << " bytes): ";
+
+        std::cerr << "[WorldSocket] auth body (" << bodyLen << " bytes): ";
         for (size_t i = 0; i < std::min(bodyLen, size_t(32)); ++i)
             std::cerr << std::hex << int(body[i]) << " ";
         if (bodyLen > 32) std::cerr << "...";
         std::cerr << std::dec << "\n";
     }
-
     result = body.empty() ? 0 : body[0];
-    std::cerr << "[WorldSocket] auth result=" << int(result) << "\n";
+    std::cerr << "[WorldSocket] auth result=" << int(result) << " (encrypted)\n";
 
-    // AUTH_OK = 0 means authentication succeeded
     if (result != 0)
     {
         std::cerr << "[WorldSocket] Auth rejected with code " << int(result) << "\n";
         return false;
     }
 
-    // Initialize encryption AFTER receiving the unencrypted success response.
-    // This matches AzerothCore's flow: server sends SMSG_AUTH_RESPONSE first,
-    // then calls _authCrypt.Init() for subsequent packets.
-    InitAuthCrypt(_srpSessionKey);
+    // Encryption is already initialized from InitAuthCrypt above
     return true;
 }
 
