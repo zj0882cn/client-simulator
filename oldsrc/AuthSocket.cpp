@@ -189,6 +189,11 @@ namespace ClientSimulator
         memcpy(p, username.c_str(), nameLen);
 
         std::cout << "[AuthSocket] Sending CMD_AUTH_LOGON_CHALLENGE (" << pktSize << " bytes)\n";
+        // Debug: show OS field bytes (offset 17, 4 bytes)
+        std::cerr << "[AuthSocket] OS field bytes: ";
+        for (int i = 17; i < 21; ++i)
+            std::cerr << "'" << buf[i] << "'(" << int(buf[i]) << ") ";
+        std::cerr << "\n";
         return SendAll(buf.data(), buf.size());
     }
 
