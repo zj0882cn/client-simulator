@@ -377,18 +377,18 @@ bool WorldSocket::SendPacket(uint16 cmd, std::vector<uint8> const& payload)
     header[1] = uint8(sizeof(uint32) + payloadSize);
     writeU32LE(header + 2, cmd);
 
-    // Build full packet: header + body
-    std::vector<uint8> packet;
-    packet.reserve(6 + payload.size());
-    packet.insert(packet.end(), header, header + 6);
-    packet.insert(packet.end(), payload.begin(), payload.end());
-
     if (_cryptInitialized)
     {
-        _sendEncrypt.UpdateData(packet.data(), packet.size());
+        // AzerothCore only encrypts the header, not the payload/body.
+        _sendEncrypt.UpdateData(header, sizeof(header));
     }
 
-    return WriteAll(packet.data(), packet.size());
+    // Send encrypted header + plaintext payload
+    if (!WriteAll(header, sizeof(header)))
+        return false;
+    if (!payload.empty())
+        return WriteAll(payload.data(), payload.size());
+    return true;
 }
 
 bool WorldSocket::RecvPacket(uint16& cmd, std::vector<uint8>& payload)
@@ -403,6 +403,7 @@ bool WorldSocket::RecvPacket(uint16& cmd, std::vector<uint8>& payload)
 
     if (_cryptInitialized)
     {
+        // AzerothCore only decrypts the header, not the payload/body.
         _recvDecrypt.UpdateData(header, 4);
         std::cerr << "[WorldSocket] RecvPacket: decrypted hdr: "
                   << std::hex << int(header[0]) << " " << int(header[1])
@@ -438,9 +439,7 @@ bool WorldSocket::RecvPacket(uint16& cmd, std::vector<uint8>& payload)
         return false;
     }
 
-    if (_cryptInitialized && payloadLen > 0)
-        _recvDecrypt.UpdateData(payload.data(), payloadLen);
-
+    // Do NOT decrypt the payload. AzerothCore only encrypts/decrypts headers.
     return true;
 }
 
@@ -571,7 +570,9 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
     result = 255;
     billingFlags = 0;
 
-    // Read 4-byte server header: uint16 size(BE) + uint16 cmd(LE)
+    // AzerothCore server sends SMSG_AUTH_RESPONSE UNENCRYPTED,
+    // then initializes AuthCrypt AFTER flushing the response.
+    // So we MUST read this packet as plaintext, regardless of success/failure.
     uint8 rawHeader[4];
     if (!ReadExact(rawHeader, 4))
     {
@@ -583,78 +584,47 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
               << std::hex << int(rawHeader[0]) << " " << int(rawHeader[1]) << " "
               << int(rawHeader[2]) << " " << int(rawHeader[3]) << std::dec << "\n";
 
-    // 第一步: 检查是否为未加密的 SMSG_AUTH_RESPONSE（仅当 result==0 时可能）
-    // 未加密响应仅在 AUTH_OK 时出现（极少数情况）
     uint16 sizeRaw = readU16BE(rawHeader);
     uint16 cmdRaw = (uint16(rawHeader[2]) | (uint16(rawHeader[3]) << 8));
 
-    // 未加密 SMSG_AUTH_RESPONSE: opcode=0x1C8 (456), size 至少 3 字节 (2 cmd + 1 result)
-    if (cmdRaw == Opcodes::SMSG_AUTH_RESPONSE && sizeRaw >= 3 && sizeRaw <= 20)
+    // Sanity check: unencrypted SMSG_AUTH_RESPONSE should have opcode 0x1EE
+    if (cmdRaw != Opcodes::SMSG_AUTH_RESPONSE)
     {
-        size_t bodyLen = sizeRaw - sizeof(uint16);
-        std::vector<uint8> body;
-        if (bodyLen > 0)
-        {
-            body.resize(bodyLen);
-            if (!ReadExact(body.data(), bodyLen))
-                return false;
-        }
-        result = body.empty() ? 0 : body[0];
-        if (result == 0)
-        {
-            InitAuthCrypt(_srpSessionKey);
-            return true;
-        }
-        // result != 0 且未加密：不可能，因为只有 AUTH_OK 才未加密
+        std::cerr << "[WorldSocket] Expected SMSG_AUTH_RESPONSE (0x1EE), got 0x"
+                  << std::hex << cmdRaw << std::dec << " (unencrypted read)\n";
         return false;
     }
 
-    // 第二步: 初始化加密，解密响应
-    // 注意：不能先读 body，因为 body 是加密的，需要先初始化加密状态
-    InitAuthCrypt(_srpSessionKey);
-
-    uint8 hdr[4];
-    memcpy(hdr, rawHeader, 4);
-    _recvDecrypt.UpdateData(hdr, 4);
-    uint16 sizeDec = readU16BE(hdr);
-    uint16 cmdDec = (uint16(hdr[2]) | (uint16(hdr[3]) << 8));
-
-    std::cerr << "[WorldSocket] decrypted response: size=" << sizeDec
-              << " cmd=0x" << std::hex << cmdDec << std::dec << "\n";
-
-    if (cmdDec != Opcodes::SMSG_AUTH_RESPONSE)
-    {
-        std::cerr << "[WorldSocket] Expected SMSG_AUTH_RESPONSE (0x1C8), got 0x"
-                  << std::hex << cmdDec << std::dec << "\n";
-        return false;
-    }
-
-    size_t bodyLen = (sizeDec >= sizeof(uint16)) ? (sizeDec - sizeof(uint16)) : 0;
+    // Read body (plaintext)
+    size_t bodyLen = (sizeRaw >= sizeof(uint16)) ? (sizeRaw - sizeof(uint16)) : 0;
     std::vector<uint8> body;
     if (bodyLen > 0)
     {
         body.resize(bodyLen);
         if (!ReadExact(body.data(), bodyLen))
             return false;
-        _recvDecrypt.UpdateData(body.data(), bodyLen);
         
-        // Debug: hex dump decrypted body
         std::cerr << "[WorldSocket] decrypted body (" << bodyLen << " bytes): ";
         for (size_t i = 0; i < std::min(bodyLen, size_t(32)); ++i)
             std::cerr << std::hex << int(body[i]) << " ";
         if (bodyLen > 32) std::cerr << "...";
         std::cerr << std::dec << "\n";
     }
-    result = body.empty() ? 0 : body[0];
 
+    result = body.empty() ? 0 : body[0];
     std::cerr << "[WorldSocket] auth result=" << int(result) << "\n";
 
-    // AUTH_OK = 0 表示认证成功
+    // AUTH_OK = 0 means authentication succeeded
     if (result != 0)
     {
         std::cerr << "[WorldSocket] Auth rejected with code " << int(result) << "\n";
         return false;
     }
+
+    // Initialize encryption AFTER receiving the unencrypted success response.
+    // This matches AzerothCore's flow: server sends SMSG_AUTH_RESPONSE first,
+    // then calls _authCrypt.Init() for subsequent packets.
+    InitAuthCrypt(_srpSessionKey);
     return true;
 }
 
