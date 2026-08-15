@@ -1,11 +1,11 @@
 #include "wow_client.h"
 #include <csignal>
+#include <fstream>
+#include <sstream>
+#include <thread>
+#include <chrono>
 
 using namespace WoWClient;
-
-// =========================================================================
-// main.cpp - WoW 客户端模拟器主入口
-// =========================================================================
 
 static std::atomic<bool> g_running{true};
 
@@ -16,26 +16,37 @@ void signalHandler(int) {
 
 void printHelp() {
     std::cout << R"(
-WoW Standalone Client Simulator (无数据库版)
+WoW Standalone Client Simulator
 
 Usage:
-    ./wow_client login --account <account> --password <password> [--character <name>] [--host <ip>] [--port <port>]
-    ./wow_client list  --account <account> --password <password> [--host <ip>]
-    ./wow_client test  --account <account> --password <password> [--host <ip>]
+    wow_client.exe                      (读取 config.ini 配置运行)
+    wow_client.exe --config <file>      (指定配置文件)
+    wow_client.exe login --account <account> --password <password> [--character <name>] [--host <ip>]
+    wow_client.exe list  --account <account> --password <password> [--host <ip>]
+    wow_client.exe test  --account <account> --password <password> [--host <ip>]
 
 Options:
     --account       账号用户名
     --password      密码
     --character     角色名（可选，不指定则选第一个角色）
-    --host          Auth 服务器地址 (默认: 119.3.216.43)
+    --host          Auth 服务器地址 (默认: 127.0.0.1)
     --port          Auth 服务器端口 (默认: 3724)
     --bot-target    Bot 模式目标玩家名 (可选)
+    --config        指定配置文件路径 (默认: config.ini)
+
+Config File Format (config.ini):
+    [Client]
+    username = your_account
+    password = your_password
+    host = 127.0.0.1
+    port = 3724
+    character = MyHero
+    bot_target = BotTarget
 
 Examples:
-    ./wow_client login --account MYACC --password mypass --character MyHero
-    ./wow_client login --account MYACC --password mypass --host 119.3.216.43
-    ./wow_client list --account MYACC --password mypass
-    ./wow_client test --account MYACC --password mypass
+    wow_client.exe                          (从 config.ini 读取)
+    wow_client.exe login --account MYACC --password mypass --character MyHero
+    wow_client.exe --config D:\config.ini
 )";
 }
 
@@ -44,18 +55,89 @@ struct Args {
     std::string account;
     std::string password;
     std::string character;
-    std::string host = "119.3.216.43";
+    std::string host = "127.0.0.1";
     uint16 port = AUTH_SERVER_PORT;
     std::string botTarget;
+    std::string configFile = "config.ini";
     bool listOnly = false;
     bool testOnly = false;
 };
 
+std::string trimString(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+void loadConfig(const std::string& filename, Args& args) {
+    std::ifstream file(filename);
+    if (!file.is_open()) return;
+
+    std::string line;
+    std::string section;
+    while (std::getline(file, line)) {
+        line = trimString(line);
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+
+        if (line[0] == '[' && line.back() == ']') {
+            section = line.substr(1, line.size() - 2);
+            continue;
+        }
+
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+
+        std::string key = trimString(line.substr(0, eq));
+        std::string value = trimString(line.substr(eq + 1));
+
+        if (section == "Client" || section == "client" || section == "auth") {
+            if (key == "username" || key == "account") args.account = value;
+            else if (key == "password") args.password = value;
+            else if (key == "host") args.host = value;
+            else if (key == "port") args.port = uint16(std::atoi(value.c_str()));
+            else if (key == "character") args.character = value;
+            else if (key == "bot_target") args.botTarget = value;
+            else if (key == "action") {
+                args.action = value;
+                if (value == "list") { args.listOnly = true; args.action = "list"; }
+                else if (value == "test") { args.testOnly = true; args.action = "test"; }
+                else args.action = "login";
+            }
+        }
+    }
+
+    std::cout << "[Config] Loaded config from: " << filename << "\n";
+}
+
 Args parseArgs(int argc, char** argv) {
     Args args;
+    std::string configFile;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        if (arg == "--help" || arg == "-?") {
+            printHelp();
+            exit(0);
+        }
+        if (arg == "--config" && i + 1 < argc) {
+            configFile = argv[++i];
+            args.configFile = configFile;
+        }
+    }
+
+    if (!configFile.empty() || argc <= 2) {
+        std::string cfgPath = configFile.empty() ? args.configFile : configFile;
+        std::ifstream testFile(cfgPath);
+        if (testFile.good()) {
+            testFile.close();
+            loadConfig(cfgPath, args);
+        }
+    }
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) { ++i; continue; }
 
         if (arg == "login" || arg == "list" || arg == "test") {
             args.action = arg;
@@ -71,18 +153,10 @@ Args parseArgs(int argc, char** argv) {
             else if (arg == "--port" || arg == "-P") args.port = uint16(std::atoi(next.c_str()));
             else if (arg == "--bot-target" || arg == "-t") args.botTarget = next;
         }
-        else if (arg == "--help" || arg == "-?") {
-            printHelp();
-            exit(0);
-        }
     }
 
     return args;
 }
-
-// =========================================================================
-// Bot 主循环
-// =========================================================================
 
 int runLoginLoop(const Args& args) {
     std::cout << "\n========================================\n";
@@ -120,7 +194,7 @@ int runLoginLoop(const Args& args) {
     std::cout << "[+] Auth login successful!\n";
     std::cout << "[*] Realms available: " << realms.size() << "\n";
     for (auto& r : realms) {
-        std::cout << "    - " << r.name << " (" << r.address << ":" << r.port << ")" << "\n";
+        std::cout << "    - " << r.name << " (" << r.address << ":" << r.port << ")\n";
     }
 
     // Test mode: stop here
@@ -133,6 +207,12 @@ int runLoginLoop(const Args& args) {
     RealmInfo realm = realms[0];
     AuthResult authResult = auth.GetResult();
     auth.Disconnect();
+
+    // IMPORTANT: Auth Server updates session_key asynchronously.
+    // We need to wait for the database write to complete before
+    // connecting to World Server, otherwise session_key may be NULL.
+    std::cout << "[*] Waiting for session_key sync...\n";
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     // ---- Step 2: World 服务器连接 ----
     std::cout << "\n[*] Connecting to World Server " << realm.address << ":" << realm.port << "...\n";
@@ -311,17 +391,23 @@ int main(int argc, char** argv) {
 #endif
 
     if (argc < 2) {
-        printHelp();
+        std::ifstream testFile("config.ini");
+        if (testFile.good()) {
+            testFile.close();
+            std::cout << "[Info] No arguments, using config.ini\n\n";
+        } else {
+            printHelp();
 #ifdef _WIN32
-        WSACleanup();
+            WSACleanup();
 #endif
-        return 1;
+            return 1;
+        }
     }
 
     Args args = parseArgs(argc, argv);
 
     if (args.account.empty() || args.password.empty()) {
-        std::cerr << "Error: --account and --password are required\n";
+        std::cerr << "Error: --account and --password are required (or set in config.ini)\n";
         printHelp();
 #ifdef _WIN32
         WSACleanup();
