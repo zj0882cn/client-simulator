@@ -102,9 +102,15 @@ namespace WoWClient
         if (flags >= 0) fcntl(fd_, F_SETFL, flags & ~O_NONBLOCK);
 #endif
 
+        #ifdef _WIN32
+        DWORD tv = 10000; // 10 seconds in milliseconds
+        setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+        setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+#else
         struct timeval tv{10, 0};
         setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
 
         encrypted_ = false;
         std::cout << "[World] Connected to " << ip_ << ":" << port_ << "\n";
@@ -561,12 +567,12 @@ namespace WoWClient
     }
 
     bool WorldSocket::HasPendingData(uint32 timeoutMs) {
-        if (fd_ < 0) return false;
+        if (fd_ == SOCKET_INVALID) return false;
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(fd_, &fds);
         struct timeval tv{0, (long)(timeoutMs * 1000)};
-        int ret = select(fd_ + 1, &fds, nullptr, nullptr, timeoutMs > 0 ? &tv : nullptr);
+        int ret = select((int)fd_ + 1, &fds, nullptr, nullptr, timeoutMs > 0 ? &tv : nullptr);
         return ret > 0;
     }
 
@@ -699,26 +705,30 @@ namespace WoWClient
         while (received < len) {
             ssize_t n = ::recv(fd_, (char*)buf + received, len - received, 0);
             if (n < 0) {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK || err == WSAETIMEDOUT) {
+#else
                 int err = errno;
-                // If socket timed out or would block, use select to wait for data
                 if (err == EAGAIN || err == EWOULDBLOCK || err == ETIMEDOUT) {
+#endif
                     fd_set fds;
                     FD_ZERO(&fds);
                     FD_SET(fd_, &fds);
                     struct timeval tv{1, 0}; // 1 second timeout
-                    int ret = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
+                    int ret = select((int)fd_ + 1, &fds, nullptr, nullptr, &tv);
                     if (ret <= 0) {
                         if (ret == 0) {
                             std::cerr << "[World] ReadExact: timeout after 1s waiting for data (" << received << "/" << len << " bytes)\n";
                         } else {
-                            std::cerr << "[World] ReadExact: select error: " << strerror(errno) << "\n";
+                            std::cerr << "[World] ReadExact: select error: " << SOCKET_ERROR_MSG() << "\n";
                         }
                         return false;
                     }
                     // Data available, continue reading
                     continue;
                 }
-                std::cerr << "[World] ReadExact: recv error: " << strerror(errno) << "\n";
+                std::cerr << "[World] ReadExact: recv error: " << SOCKET_ERROR_MSG() << "\n";
                 return false;
             }
             if (n == 0) {
@@ -734,9 +744,17 @@ namespace WoWClient
     bool WorldSocket::WriteAll(const void* buf, size_t len) {
         size_t sent = 0;
         while (sent < len) {
+#ifdef _WIN32
+            ssize_t n = ::send(fd_, (const char*)buf + sent, len - sent, 0);
+#else
             ssize_t n = ::send(fd_, (const char*)buf + sent, len - sent, MSG_NOSIGNAL);
+#endif
             if (n <= 0) {
+#ifdef _WIN32
+                std::cerr << "[World] send failed: " << SOCKET_ERROR_MSG() << "\n";
+#else
                 std::cerr << "[World] send failed: " << strerror(errno) << "\n";
+#endif
                 return false;
             }
             sent += n;

@@ -10,7 +10,8 @@ find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 
 # Platform-specific settings
-if(WIN32)
+# Use CMAKE_SYSTEM_NAME to detect target platform (works for cross-compilation)
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
     # Windows: link ws2_32 for sockets, crypt32 for OpenSSL cert API
     set(PLATFORM_LIBS ws2_32 crypt32 gdi32)
     add_definitions(-D_WIN32_WINNT=0x0601)

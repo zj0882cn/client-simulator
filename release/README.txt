@@ -1,36 +1,47 @@
-WoW Standalone Client Simulator - Windows 版
-============================================
+=======================================
+  WoW Client Simulator
+  魔兽世界客户端模拟器
+=======================================
 
-使用方法:
-1. 编辑 config.ini 配置文件，填入服务器地址、账号和密码
-2. 双击 wow_client.exe 运行，或在命令行执行
+【使用方法】
+1. 双击 wow_client.exe 运行
+2. 或在命令行中运行: wow_client.exe [选项]
 
-配置文件说明 (config.ini):
-    [auth]
-    account = TEST              ; 游戏账号
-    password = TEST123          ; 账号密码
-    host = 127.0.0.1            ; Auth 服务器地址
-    port = 3724                 ; Auth 服务器端口
-    character = TestHero        ; 角色名（可选）
-    bot_target =                ; Bot 模式目标（可选）
-    action = login              ; login=完整登录, list=仅列表, test=仅测试
+【命令行参数】
+  -u, --username <name>  账号名
+  -p, --password <pass>  密码
+  -h, --host <ip>        服务器地址 (默认: 127.0.0.1)
+  -P, --port <port>      认证服务器端口 (默认: 3724)
+  -c, --config <file>    配置文件路径 (默认: config.ini)
+  --help                 显示帮助信息
 
-命令行参数 (可选):
-    wow_client.exe                              读取 config.ini
-    wow_client.exe login --account XXX --password XXX --character XXX
-    wow_client.exe list --account XXX --password XXX
-    wow_client.exe test --account XXX --password XXX
-    wow_client.exe --config D:\path\to\config.ini  指定配置文件
+【示例】
+  # 使用配置文件
+  wow_client.exe
 
-示例 (用户名 test 密码 test 服务器本机):
-    方式1: 修改 config.ini 后双击运行
-    方式2: 命令行: wow_client.exe login --account test --password test --host 127.0.0.1
+  # 命令行指定参数
+  wow_client.exe -u test -p test -h 127.0.0.1
 
-流程:
-    1. 客户端连接 AuthServer (3724) 完成 SRP6 认证
-    2. 自动获取 Realm 列表
-    3. 连接 WorldServer (8085) 进入游戏世界
+  # 连接远程服务器
+  wow_client.exe -u myaccount -p mypassword -h 119.3.216.43
 
-注意:
-- 静态编译版本，单文件即可独立运行，无需任何 DLL 或运行时
-- 请确保防火墙允许程序出站访问 3724 / 8085 端口
+【配置文件 config.ini】
+  可在 config.ini 中预设账号、密码、服务器地址等参数。
+  程序启动时会自动读取同目录下的 config.ini。
+
+【系统要求】
+  - Windows 7/8/10/11 (64-bit)
+  - 无需额外安装任何运行时 (VC++ runtime, OpenSSL 等均已内置)
+  - 仅依赖 Windows 系统自带的 DLL 文件
+
+【故障排查】
+  1. 如果提示连接失败，请检查服务器地址和端口是否正确
+  2. 如果提示认证失败，请确认账号密码是否正确
+  3. 如果连接 World Server 超时，可能是服务器未启动或网络问题
+  4. 查看控制台日志可获取详细调试信息
+
+【技术信息】
+  - 基于 AzerothCore 协议实现
+  - 支持 SRP6 认证协议
+  - 支持 ARC4 加密通信
+  - 静态编译，单文件部署
