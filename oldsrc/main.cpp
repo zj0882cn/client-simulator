@@ -45,6 +45,14 @@ struct BotConfig
     uint16 authPort = 3724;
 };
 
+static std::string trimStr(std::string const& s)
+{
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
 static BotConfig LoadConfig(std::string const& filePath)
 {
     BotConfig conf;
@@ -56,20 +64,24 @@ static BotConfig LoadConfig(std::string const& filePath)
     }
 
     std::string line;
+    std::string section;
     while (std::getline(f, line))
     {
-        if (line.empty() || line[0] == '#')
+        line = trimStr(line);
+        if (line.empty() || line[0] == '#' || line[0] == ';')
             continue;
+
+        if (line[0] == '[' && line.back() == ']')
+        {
+            section = trimStr(line.substr(1, line.size() - 2));
+            continue;
+        }
+
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
 
-        std::string key = line.substr(0, eq);
-        std::string val = line.substr(eq + 1);
-
-        while (!key.empty() && key.back() == ' ') key.pop_back();
-        while (!key.empty() && key.front() == ' ') key.erase(0, 1);
-        while (!val.empty() && val.back() == ' ') val.pop_back();
-        while (!val.empty() && val.front() == ' ') val.erase(0, 1);
+        std::string key = trimStr(line.substr(0, eq));
+        std::string val = trimStr(line.substr(eq + 1));
 
         if (val.size() >= 2 && val.front() == '"' && val.back() == '"')
             val = val.substr(1, val.size() - 2);
@@ -80,6 +92,14 @@ static BotConfig LoadConfig(std::string const& filePath)
         else if (key == "BOT_SPAWN_INTERVAL_MS") conf.spawnIntervalMs = std::stoi(val);
         else if (key == "AUTH_HOST")         conf.authHost = val;
         else if (key == "AUTH_PORT")         conf.authPort = uint16(std::atoi(val.c_str()));
+        else if (key == "account" || key == "username")
+        {
+            conf.prefix = val;
+            conf.count = 1;
+        }
+        else if (key == "password")          conf.password = val;
+        else if (key == "host")              conf.authHost = val;
+        else if (key == "port")              conf.authPort = uint16(std::atoi(val.c_str()));
     }
     return conf;
 }

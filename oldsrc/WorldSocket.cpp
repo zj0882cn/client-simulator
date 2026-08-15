@@ -481,7 +481,6 @@ bool WorldSocket::SendAuthSession(AuthResult const& auth, std::string const& use
     std::transform(normUser.begin(), normUser.end(), normUser.begin(), ::toupper);
 
     // digest = SHA1(account + [0,0,0,0] + clientSeed(4) + serverSeed(4) + sessionKey(40))
-    // 完全匹配服务端 WorldSocket::HandleAuthSession 的计算
     Acore::Crypto::SHA1::Digest digest;
     {
         Acore::Crypto::SHA1 ctx;
@@ -495,54 +494,37 @@ bool WorldSocket::SendAuthSession(AuthResult const& auth, std::string const& use
         digest = ctx.GetDigest();
     }
 
-    uint32 build = 12340;
-    uint32 serverId = 0;
-    uint32 loginServerType = 0; // GRUNT
-    uint32 clientSeedVal = readU32LE(_clientSeed);
-    uint32 regionId = 2;   // US
-    uint32 battlegroupId = 1;
-    uint64 dosResponse = 0;
-
+    // WoW 3.3.5a CMSG_AUTH_SESSION format:
+    //   string  accountName (null-terminated)
+    //   uint8   digest[20]
+    //   uint32  seed (client seed, LE)
+    //   uint8   realmId
+    //   uint32  addonInfoSize (0 = empty)
     std::vector<uint8> payload;
-    auto pushU32 = [&](uint32 v) {
-        uint8 buf[4];
-        writeU32LE(buf, v);
-        payload.insert(payload.end(), buf, buf + 4);
-    };
-    auto pushU64 = [&](uint64 v) {
-        uint8 buf[8];
-        writeU64LE(buf, v);
-        payload.insert(payload.end(), buf, buf + 8);
-    };
+    payload.reserve(normUser.size() + 1 + 20 + 4 + 1 + 4);
 
-    payload.reserve(4 + 4 + normUser.size() + 1 + 4 + 4 + 4 + 4 + 1 + 8 + 20);
-    pushU32(build);
-    pushU32(serverId);
+    // Account name (null-terminated)
     payload.insert(payload.end(), normUser.begin(), normUser.end());
-    payload.push_back(0); // null terminator
-    pushU32(loginServerType);
-    payload.insert(payload.end(), _clientSeed, _clientSeed + 4);
-    pushU32(regionId);
-    pushU32(battlegroupId);
-    payload.push_back(realmId); // WoW 3.3.5: realmId is uint8 (1 byte)
-    pushU64(dosResponse);
-    payload.insert(payload.end(), digest.data(), digest.data() + digest.size());
+    payload.push_back(0);
 
-    // ── Addon info (required by server) ──
-    // 格式: uint32 uncompressed_size + [zlib_compressed_data]
-    // 如果 uncompressed_size == 0，ReadAddonsInfo 直接 return（不读取更多数据）
-    // 解压后: uint32 addon_count, 然后每个 addon: string name + uint8 enabled + uint32 CRC + uint32 unk1
-    {
-        // 最简单方式: uncompressed_size = 0, 无压缩数据
-        uint8 sizeBuf[4] = { 0, 0, 0, 0 };
-        payload.insert(payload.end(), sizeBuf, sizeBuf + 4);
-        // 注意: 如果 uncompressed_size=0, ReadAddonsInfo 跳过后续所有数据
-    }
+    // Digest (20 bytes)
+    payload.insert(payload.end(), digest.data(), digest.data() + 20);
+
+    // Client seed (4 bytes LE)
+    uint8 seedBuf[4];
+    writeU32LE(seedBuf, readU32LE(_clientSeed));
+    payload.insert(payload.end(), seedBuf, seedBuf + 4);
+
+    // Realm ID (1 byte)
+    payload.push_back(realmId);
+
+    // Addon info size (4 bytes LE, 0 = no addons)
+    uint8 addonBuf[4] = { 0, 0, 0, 0 };
+    payload.insert(payload.end(), addonBuf, addonBuf + 4);
 
     _srpSessionKey.assign(auth.sessionKey.data(), auth.sessionKey.data() + auth.sessionKey.size());
     _sessionKey = digest;
 
-    // Hex dump payload
     std::cerr << "[WorldSocket] CMSG_AUTH_SESSION payload (" << payload.size() << " bytes): ";
     for (size_t i = 0; i < payload.size(); ++i)
     {
@@ -551,13 +533,8 @@ bool WorldSocket::SendAuthSession(AuthResult const& auth, std::string const& use
     }
     std::cerr << std::dec << "\n";
 
-    // 先发送明文 CMSG_AUTH_SESSION
     if (!SendPacket(Opcodes::CMSG_AUTH_SESSION, payload))
         return false;
-
-    // 先不初始化加密，等收到 SMSG_AUTH_RESPONSE 后再决定
-    // 如果服务端返回错误（如 AUTH_UNKNOWN_ACCOUNT），加密未初始化，响应是明文的
-    // 如果服务端返回成功，加密已初始化，响应是加密的
 
     _loginState = LoginState::AuthSent;
     std::cout << "[WorldSocket] Sending CMSG_AUTH_SESSION user=" << normUser
