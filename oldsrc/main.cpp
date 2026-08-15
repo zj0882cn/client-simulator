@@ -155,6 +155,10 @@ void BotThread(int botIndex, int totalBots, BotConfig const& conf, std::string c
         AuthResult authResult = auth.GetResult();
         auth.Disconnect();
 
+        // 等待 Auth 服务器异步写入 session_key 到数据库
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::cerr << "[Bot " << botIndex << "] 等待 session_key 写入数据库...\n";
+
         // ── Step 2: World 连接 ──
         WorldSocket world(realm.address, realm.port);
         world.SetUsername(username);
