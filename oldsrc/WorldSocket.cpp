@@ -504,28 +504,28 @@ bool WorldSocket::SendAuthSession(AuthResult const& auth, std::string const& use
     uint64 dosResponse = 0;
 
     std::vector<uint8> payload;
-    auto push = [&](auto v) {
+    auto pushU32 = [&](uint32 v) {
+        uint8 buf[4];
+        writeU32LE(buf, v);
+        payload.insert(payload.end(), buf, buf + 4);
+    };
+    auto pushU64 = [&](uint64 v) {
         uint8 buf[8];
-        if constexpr (sizeof(v) <= 4)
-            writeU32LE(buf, uint32(v));
-        else
-            writeU64LE(buf, v);
-        size_t s = sizeof(v) <= 4 ? 4 : 8;
-        payload.insert(payload.end(), buf, buf + s);
+        writeU64LE(buf, v);
+        payload.insert(payload.end(), buf, buf + 8);
     };
 
-    payload.reserve(4 + 4 + normUser.size() + 1 + 4 + 4 + 4 + 4 + 8 + 20);
-    push(build);
-    push(serverId);
+    payload.reserve(4 + 4 + normUser.size() + 1 + 4 + 4 + 4 + 4 + 1 + 8 + 20);
+    pushU32(build);
+    pushU32(serverId);
     payload.insert(payload.end(), normUser.begin(), normUser.end());
     payload.push_back(0); // null terminator
-    push(loginServerType);
-    // 客户端种子：直接传原始 4 字节（server 用 .read() 读原始字节，不经过 EndianConvert）
+    pushU32(loginServerType);
     payload.insert(payload.end(), _clientSeed, _clientSeed + 4);
-    push(regionId);
-    push(battlegroupId);
-    push(realmId);
-    push(dosResponse);
+    pushU32(regionId);
+    pushU32(battlegroupId);
+    payload.push_back(realmId); // WoW 3.3.5: realmId is uint8 (1 byte)
+    pushU64(dosResponse);
     payload.insert(payload.end(), digest.data(), digest.data() + digest.size());
 
     // ── Addon info (required by server) ──
