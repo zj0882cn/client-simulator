@@ -40,7 +40,7 @@ namespace Acore::Crypto
         template <typename Container>
         void UpdateData(Container& c) { UpdateData(std::data(c), std::size(c)); }
     private:
-        EVP_CIPHER* _cipher;
+        const EVP_CIPHER* _cipher;
         EVP_CIPHER_CTX* _ctx;
     };
 }

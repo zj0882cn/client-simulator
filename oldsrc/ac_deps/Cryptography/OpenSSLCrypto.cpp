@@ -17,39 +17,15 @@
 
 #include "OpenSSLCrypto.h"
 #include <openssl/crypto.h>
-#include <openssl/provider.h>
-
-OSSL_PROVIDER* LegacyProvider;
-OSSL_PROVIDER* DefaultProvider;
-
-#if AC_PLATFORM == AC_PLATFORM_WINDOWS
-#include <boost/dll/runtime_symbol_info.hpp>
-#include <filesystem>
-
-void SetupLibrariesForWindows()
-{
-    namespace fs = std::filesystem;
-
-    fs::path programLocation{ boost::dll::program_location().remove_filename().string() };
-    fs::path libLegacy{ boost::dll::program_location().remove_filename().string() + "/legacy.dll" };
-
-    ASSERT(fs::exists(libLegacy), "Not found 'legacy.dll'. Please copy library 'legacy.dll' from OpenSSL default dir to '{}'", programLocation.generic_string());
-    OSSL_PROVIDER_set_default_search_path(nullptr, programLocation.generic_string().c_str());
-}
-#endif
 
 void OpenSSLCrypto::threadsSetup()
 {
-#if AC_PLATFORM == AC_PLATFORM_WINDOWS
-    SetupLibrariesForWindows();
-#endif
-    LegacyProvider = OSSL_PROVIDER_load(nullptr, "legacy");
-    DefaultProvider = OSSL_PROVIDER_load(nullptr, "default");
+    // OpenSSL 1.1: No provider setup needed
+    // OpenSSL 3.0: Uncomment below to enable legacy provider
+    // OSSL_PROVIDER_load(nullptr, "legacy");
 }
 
 void OpenSSLCrypto::threadsCleanup()
 {
-    OSSL_PROVIDER_unload(LegacyProvider);
-    OSSL_PROVIDER_unload(DefaultProvider);
-    OSSL_PROVIDER_set_default_search_path(nullptr, nullptr);
+    // No cleanup needed for OpenSSL 1.1
 }
