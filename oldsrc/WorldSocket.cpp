@@ -332,16 +332,35 @@ void WorldSocket::InitAuthCrypt(std::vector<uint8> const& sessionKey)
     // 完全匹配服务端 AuthCrypt::Init (src/common/Cryptography/Authentication/AuthCrypt.cpp)
     // 服务端 _serverEncrypt (Server→Client 加密) → 客户端 _recvDecrypt (收包解密)
     uint8 ServerEncryptionKey[] = { 0xCC, 0x98, 0xAE, 0x04, 0xE8, 0x97, 0xEA, 0xCA, 0x12, 0xDD, 0xC0, 0x93, 0x42, 0x91, 0x53, 0x57 };
-    _recvDecrypt.Init(Acore::Crypto::HMAC_SHA1::GetDigestOf(ServerEncryptionKey, sessionKey));
-
-    // 服务端 _clientDecrypt (Client→Server 解密) → 客户端 _sendEncrypt (发包加密)
     uint8 ServerDecryptionKey[] = { 0xC2, 0xB3, 0x72, 0x3C, 0xC6, 0xAE, 0xD9, 0xB5, 0x34, 0x3C, 0x53, 0xEE, 0x2F, 0x43, 0x67, 0xCE };
-    _sendEncrypt.Init(Acore::Crypto::HMAC_SHA1::GetDigestOf(ServerDecryptionKey, sessionKey));
+
+    auto recvKey = Acore::Crypto::HMAC_SHA1::GetDigestOf(ServerEncryptionKey, sessionKey);
+    auto sendKey = Acore::Crypto::HMAC_SHA1::GetDigestOf(ServerDecryptionKey, sessionKey);
+
+    // Debug: 打印密钥
+    auto hexStr = [](auto const& data) -> std::string {
+        std::string result;
+        char buf[3];
+        for (uint8 b : data) {
+            snprintf(buf, sizeof(buf), "%02x", b);
+            result += buf;
+        }
+        return result;
+    };
+    std::cerr << "[WorldSocket] sessionKey (" << sessionKey.size() << " bytes): "
+              << hexStr(sessionKey) << "\n";
+    std::cerr << "[WorldSocket] recvKey (HMAC-SHA1 of SEncryptionKey+sessionKey): "
+              << hexStr(recvKey) << "\n";
+    std::cerr << "[WorldSocket] sendKey (HMAC-SHA1 of SDecryptionKey+sessionKey): "
+              << hexStr(sendKey) << "\n";
+
+    _recvDecrypt.Init(recvKey);
+    _sendEncrypt.Init(sendKey);
 
     // ARC4-drop1024
     std::array<uint8, 1024> syncBuf{};
-    _sendEncrypt.UpdateData(syncBuf);
     _recvDecrypt.UpdateData(syncBuf);
+    _sendEncrypt.UpdateData(syncBuf);
 
     _cryptInitialized = true;
     std::cout << "[WorldSocket] AuthCrypt initialized\n";
@@ -378,13 +397,25 @@ bool WorldSocket::RecvPacket(uint16& cmd, std::vector<uint8>& payload)
     // Server→Client header: uint16 size(BE) + uint16 cmd(LE) = 4 bytes
     uint8 header[4];
     if (!ReadExact(header, 4))
+    {
+        std::cerr << "[WorldSocket] RecvPacket: ReadExact header failed\n";
         return false;
+    }
 
     if (_cryptInitialized)
+    {
         _recvDecrypt.UpdateData(header, 4);
+        std::cerr << "[WorldSocket] RecvPacket: decrypted hdr: "
+                  << std::hex << int(header[0]) << " " << int(header[1])
+                  << " " << int(header[2]) << " " << int(header[3])
+                  << std::dec << "\n";
+    }
 
     uint16 size = readU16BE(header);
     cmd = uint16(header[2]) | (uint16(header[3]) << 8);
+
+    std::cerr << "[WorldSocket] RecvPacket: cmd=0x" << std::hex << cmd
+              << " size=" << size << std::dec << "\n";
 
     // ServerPktHeader 的 size = sizeof(cmd) + payload_size（最小为 2，只有 cmd 无 payload）
     if (size < sizeof(uint16))
@@ -402,7 +433,11 @@ bool WorldSocket::RecvPacket(uint16& cmd, std::vector<uint8>& payload)
 
     payload.resize(payloadLen);
     if (!ReadExact(payload.data(), payloadLen))
+    {
+        std::cerr << "[WorldSocket] RecvPacket: ReadExact payload failed ("
+                  << payloadLen << " bytes)\n";
         return false;
+    }
 
     if (_cryptInitialized && payloadLen > 0)
         _recvDecrypt.UpdateData(payload.data(), payloadLen);
@@ -603,6 +638,13 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
         if (!ReadExact(body.data(), bodyLen))
             return false;
         _recvDecrypt.UpdateData(body.data(), bodyLen);
+        
+        // Debug: hex dump decrypted body
+        std::cerr << "[WorldSocket] decrypted body (" << bodyLen << " bytes): ";
+        for (size_t i = 0; i < std::min(bodyLen, size_t(32)); ++i)
+            std::cerr << std::hex << int(body[i]) << " ";
+        if (bodyLen > 32) std::cerr << "...";
+        std::cerr << std::dec << "\n";
     }
     result = body.empty() ? 0 : body[0];
 
