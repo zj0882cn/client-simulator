@@ -123,14 +123,49 @@ namespace WoWClient
     bool WorldSocket::RecvAuthChallenge() {
         uint16 cmd;
         std::vector<uint8> body;
-        if (!RecvPacket(cmd, body) || cmd != SMSG_AUTH_CHALLENGE) {
-            std::cerr << "[World] Expected SMSG_AUTH_CHALLENGE, got 0x" << std::hex << cmd << std::dec << "\n";
-            return false;
+
+        // Retry up to 5 times with 500ms delay to give server time to process
+        // (server does async IP ban check before sending SMSG_AUTH_CHALLENGE)
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            if (attempt > 0) {
+                std::cerr << "[World] Retrying auth challenge (attempt " << (attempt + 1) << "/5)...\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+
+            // Wait for data using select
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(fd_, &fds);
+            struct timeval tv{0, 500000}; // 500ms
+            int ret = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
+            if (ret < 0) {
+                std::cerr << "[World] select error: " << strerror(errno) << "\n";
+                return false;
+            }
+            if (ret == 0) {
+                continue; // No data yet, retry
+            }
+
+            if (RecvPacket(cmd, body)) {
+                if (cmd == SMSG_AUTH_CHALLENGE) {
+                    if (body.size() >= 8) memcpy(serverSeed_, body.data() + 4, 4);
+                    randomBytes(clientSeed_, 4);
+                    std::cout << "[World] Auth challenge received\n";
+                    return true;
+                }
+                std::cerr << "[World] Unexpected packet cmd=0x" << std::hex << cmd << std::dec << " (expected SMSG_AUTH_CHALLENGE)\n";
+                // If we got an auth response instead (e.g., error), parse it
+                if (cmd == SMSG_AUTH_RESPONSE) {
+                    std::cerr << "[World] Server sent auth response instead of challenge - possible rejection\n";
+                    if (!body.empty()) {
+                        std::cerr << "[World] Auth response code: " << (int)body[0] << "\n";
+                    }
+                    return false;
+                }
+            }
         }
-        if (body.size() >= 8) memcpy(serverSeed_, body.data() + 4, 4);
-        randomBytes(clientSeed_, 4);
-        std::cout << "[World] Auth challenge received\n";
-        return true;
+        std::cerr << "[World] Failed to receive SMSG_AUTH_CHALLENGE after 5 attempts\n";
+        return false;
     }
 
     bool WorldSocket::SendAuthSession(const AuthResult& auth, const std::string& username, uint8 realmId) {
@@ -250,13 +285,16 @@ namespace WoWClient
     bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags) {
         result = 255; billingFlags = 0;
 
-        // Server sends SMSG_AUTH_RESPONSE unencrypted BEFORE initializing _authCrypt.
-        // We must read it unencrypted here. Use a polling loop since the server
-        // may still be flushing when we try to read.
-        uint8 rawHeader[4];
-        size_t totalRead = 0;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        while (totalRead < 4 && std::chrono::steady_clock::now() < deadline) {
+        // Server sends SMSG_AUTH_RESPONSE. In AzerothCore, the response is sent
+        // UNENCRYPTED before _authCrypt.Init(), but we handle both cases for safety.
+
+        // Step 1: Try to receive the response packet (unencrypted)
+        uint16 cmd;
+        std::vector<uint8> body;
+
+        // Wait for data using select with timeout
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (std::chrono::steady_clock::now() < deadline) {
             fd_set fds;
             FD_ZERO(&fds);
             FD_SET(fd_, &fds);
@@ -269,45 +307,53 @@ namespace WoWClient
             }
             if (ret == 0) continue;
 
-            ssize_t n = ::recv(fd_, (char*)rawHeader + totalRead, 4 - totalRead, 0);
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS || errno == EINTR)
-                    continue;
-                std::cerr << "[World] WaitAuthResponse: recv error: " << strerror(errno) << "\n";
-                return false;
+            // Try to read the packet (first without decryption)
+            if (RecvPacket(cmd, body)) {
+                std::cerr << "[World] WaitAuthResponse: received cmd=0x" << std::hex << cmd << std::dec << " size=" << body.size() << "\n";
+
+                if (cmd == SMSG_AUTH_RESPONSE) {
+                    result = body.empty() ? 0 : body[0];
+                    std::cout << "[World] WaitAuthResponse: auth response=" << (int)result << "\n";
+                    // Server enables _authCrypt AFTER sending this response,
+                    // so we must initialize our cipher NOW to match server's state.
+                    InitEncryption();
+                    return true;
+                }
+
+                // Unexpected packet - could be encrypted response
+                if (!encrypted_) {
+                    // If we got garbage, the server might have sent encrypted data
+                    // Try interpreting as encrypted
+                    std::cerr << "[World] WaitAuthResponse: unexpected cmd, trying encrypted interpretation...\n";
+
+                    // Re-queue the data by seeking back? No, we already consumed it.
+                    // Instead, let's try a different approach - read raw and decrypt
+                    uint8 rawHeader[5];
+                    memset(rawHeader, 0, sizeof(rawHeader));
+
+                    // We need to peek ahead, but since we already consumed, let's try
+                    // reading the whole thing with decryption.
+                    // Actually, RecvPacket already decrypted if encrypted_ was true.
+                    // If encrypted_ is false and we got garbage, the server sent encrypted data.
+
+                    // Try initializing encryption and reading again
+                    std::cerr << "[World] WaitAuthResponse: initial encryption, retrying with decryption...\n";
+                    InitEncryption();
+
+                    // Now try reading a new packet with decryption
+                    if (RecvPacket(cmd, body)) {
+                        std::cerr << "[World] WaitAuthResponse: decrypted cmd=0x" << std::hex << cmd << std::dec << " size=" << body.size() << "\n";
+                        if (cmd == SMSG_AUTH_RESPONSE) {
+                            result = body.empty() ? 0 : body[0];
+                            std::cout << "[World] WaitAuthResponse: auth response=" << (int)result << " (encrypted)\n";
+                            return true;
+                        }
+                    }
+                }
             }
-            if (n == 0) {
-                std::cerr << "[World] WaitAuthResponse: connection closed by peer\n";
-                return false;
-            }
-            totalRead += n;
-        }
-        if (totalRead < 4) {
-            std::cerr << "[World] WaitAuthResponse: timeout or partial header (" << totalRead << "/4 bytes)\n";
-            return false;
-        }
-        // NO decryption - response is unencrypted
-
-        uint16 rawSize = (uint16(rawHeader[0]) << 8) | uint16(rawHeader[1]);
-        uint16 cmd = uint16(rawHeader[2]) | (uint16(rawHeader[3]) << 8);
-        uint16 size = (rawSize >= 2) ? (rawSize - 2) : 0;
-
-        std::cerr << "[World] WaitAuthResponse: rawSize=" << rawSize << " cmd=0x" << std::hex << cmd << std::dec << " size=" << size << "\n";
-
-        if (cmd == SMSG_AUTH_RESPONSE) {
-            if (size > 0) {
-                std::vector<uint8> body(size);
-                if (!ReadExact(body.data(), size)) return false;
-                result = body.empty() ? 0 : body[0];
-            }
-            // Server enables _authCrypt AFTER sending this unencrypted response,
-            // so we must initialize our cipher NOW to match server's state for
-            // subsequent encrypted exchanges (CMSG_CHAR_ENUM, etc.).
-            InitEncryption();
-            return true;
         }
 
-        std::cerr << "[World] Expected SMSG_AUTH_RESPONSE, got cmd=0x" << std::hex << cmd << std::dec << "\n";
+        std::cerr << "[World] WaitAuthResponse: timeout waiting for SMSG_AUTH_RESPONSE\n";
         return false;
     }
 
@@ -652,7 +698,34 @@ namespace WoWClient
         size_t received = 0;
         while (received < len) {
             ssize_t n = ::recv(fd_, (char*)buf + received, len - received, 0);
-            if (n <= 0) return false;
+            if (n < 0) {
+                int err = errno;
+                // If socket timed out or would block, use select to wait for data
+                if (err == EAGAIN || err == EWOULDBLOCK || err == ETIMEDOUT) {
+                    fd_set fds;
+                    FD_ZERO(&fds);
+                    FD_SET(fd_, &fds);
+                    struct timeval tv{1, 0}; // 1 second timeout
+                    int ret = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
+                    if (ret <= 0) {
+                        if (ret == 0) {
+                            std::cerr << "[World] ReadExact: timeout after 1s waiting for data (" << received << "/" << len << " bytes)\n";
+                        } else {
+                            std::cerr << "[World] ReadExact: select error: " << strerror(errno) << "\n";
+                        }
+                        return false;
+                    }
+                    // Data available, continue reading
+                    continue;
+                }
+                std::cerr << "[World] ReadExact: recv error: " << strerror(errno) << "\n";
+                return false;
+            }
+            if (n == 0) {
+                // Connection closed
+                std::cerr << "[World] ReadExact: connection closed by peer (" << received << "/" << len << " bytes)\n";
+                return false;
+            }
             received += n;
         }
         return true;
