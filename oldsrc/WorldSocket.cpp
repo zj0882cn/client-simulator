@@ -329,15 +329,16 @@ bool WorldSocket::WriteAll(void const* buf, size_t len)
 
 void WorldSocket::InitAuthCrypt(std::vector<uint8> const& sessionKey)
 {
-    // 完全匹配服务端 AuthCrypt::Init (src/common/Cryptography/Authentication/AuthCrypt.cpp)
-    // 服务端 _serverEncrypt (Server→Client 加密) → 客户端 _recvDecrypt (收包解密)
+    // AzerothCore: HMAC_SHA1::GetDigestOf(ServerKey, session)
+    // 这里 session 是 data，ServerKey 作为 HMAC 的 seed (key)
     uint8 ServerEncryptionKey[] = { 0xCC, 0x98, 0xAE, 0x04, 0xE8, 0x97, 0xEA, 0xCA, 0x12, 0xDD, 0xC0, 0x93, 0x42, 0x91, 0x53, 0x57 };
     uint8 ServerDecryptionKey[] = { 0xC2, 0xB3, 0x72, 0x3C, 0xC6, 0xAE, 0xD9, 0xB5, 0x34, 0x3C, 0x53, 0xEE, 0x2F, 0x43, 0x67, 0xCE };
 
+    // HMAC_SHA1::GetDigestOf(seed, data) — seed 是 HMAC key, data 是输入
     auto recvKey = Acore::Crypto::HMAC_SHA1::GetDigestOf(ServerEncryptionKey, sessionKey);
     auto sendKey = Acore::Crypto::HMAC_SHA1::GetDigestOf(ServerDecryptionKey, sessionKey);
 
-    // Debug: 打印密钥
+    // Debug: 打印密钥以验证
     auto hexStr = [](auto const& data) -> std::string {
         std::string result;
         char buf[3];
@@ -349,10 +350,8 @@ void WorldSocket::InitAuthCrypt(std::vector<uint8> const& sessionKey)
     };
     std::cerr << "[WorldSocket] sessionKey (" << sessionKey.size() << " bytes): "
               << hexStr(sessionKey) << "\n";
-    std::cerr << "[WorldSocket] recvKey (HMAC-SHA1 of SEncryptionKey+sessionKey): "
-              << hexStr(recvKey) << "\n";
-    std::cerr << "[WorldSocket] sendKey (HMAC-SHA1 of SDecryptionKey+sessionKey): "
-              << hexStr(sendKey) << "\n";
+    std::cerr << "[WorldSocket] recvKey: " << hexStr(recvKey) << "\n";
+    std::cerr << "[WorldSocket] sendKey: " << hexStr(sendKey) << "\n";
 
     _recvDecrypt.Init(recvKey);
     _sendEncrypt.Init(sendKey);
@@ -649,6 +648,13 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
     result = body.empty() ? 0 : body[0];
 
     std::cerr << "[WorldSocket] auth result=" << int(result) << "\n";
+
+    // AUTH_OK = 0 表示认证成功
+    if (result != 0)
+    {
+        std::cerr << "[WorldSocket] Auth rejected with code " << int(result) << "\n";
+        return false;
+    }
     return true;
 }
 
