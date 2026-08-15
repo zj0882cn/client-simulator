@@ -32,5 +32,5 @@ WoW Standalone Client Simulator - Windows 版
     3. 连接 WorldServer (8085) 进入游戏世界
 
 注意:
-- 附带 libgcc_s_seh-1.dll / libstdc++-6.dll，直接解压即可独立运行
+- 静态编译版本，单文件即可独立运行，无需任何 DLL 或运行时
 - 请确保防火墙允许程序出站访问 3724 / 8085 端口
