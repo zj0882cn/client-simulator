@@ -570,13 +570,11 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
     result = 255;
     billingFlags = 0;
 
-    // Read the raw 4-byte response header.
-    // The server may send SMSG_AUTH_RESPONSE either encrypted or unencrypted
-    // depending on its version/configuration. We handle both cases:
-    //   1) If plaintext header matches → read body as plaintext, then Init encryption.
-    //   2) If plaintext header doesn't match → Init encryption first, decrypt header,
-    //      then read body as plaintext.
-    // In both cases ONLY the header is encrypted/decrypted (AzerothCore design).
+    // The server response (SMSG_AUTH_RESPONSE) arrives as a 4-byte header + body.
+    // AzerothCore encrypts ONLY the header (ARC4), never the body.
+    // We must init encryption BEFORE reading so we can decrypt the header.
+    InitAuthCrypt(_srpSessionKey);
+
     uint8 rawHeader[4];
     if (!ReadExact(rawHeader, 4))
     {
@@ -584,67 +582,34 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
         return false;
     }
 
-    std::cerr << "[WorldSocket] raw response bytes: "
-              << std::hex << int(rawHeader[0]) << " " << int(rawHeader[1]) << " "
-              << int(rawHeader[2]) << " " << int(rawHeader[3]) << std::dec << "\n";
+    // Decrypt the header with the receive ARC4 key
+    _recvDecrypt.UpdateData(rawHeader, 4);
 
-    uint16 sizeRaw = readU16BE(rawHeader);
-    uint16 cmdRaw = (uint16(rawHeader[2]) | (uint16(rawHeader[3]) << 8));
+    uint16 size = readU16BE(rawHeader);
+    uint16 cmd  = uint16(rawHeader[2]) | (uint16(rawHeader[3]) << 8);
 
-    // ── Case 1: plaintext SMSG_AUTH_RESPONSE ──
-    if (cmdRaw == Opcodes::SMSG_AUTH_RESPONSE && sizeRaw >= sizeof(uint16))
-    {
-        size_t bodyLen = sizeRaw - sizeof(uint16);
-        std::vector<uint8> body;
-        if (bodyLen > 0)
-        {
-            body.resize(bodyLen);
-            if (!ReadExact(body.data(), bodyLen))
-                return false;
-        }
-        result = body.empty() ? 0 : body[0];
-        std::cerr << "[WorldSocket] auth result=" << int(result) << " (unencrypted)\n";
+    std::cerr << "[WorldSocket] decrypted auth response: cmd=0x"
+              << std::hex << cmd << " size=" << size << std::dec << "\n";
 
-        if (result != 0)
-        {
-            std::cerr << "[WorldSocket] Auth rejected with code " << int(result) << "\n";
-            return false;
-        }
-
-        // Init encryption AFTER consuming the unencrypted success response
-        InitAuthCrypt(_srpSessionKey);
-        return true;
-    }
-
-    // ── Case 2: encrypted SMSG_AUTH_RESPONSE ──
-    // The header is ARC4-encrypted; initialize decryption first, then decrypt.
-    InitAuthCrypt(_srpSessionKey);
-
-    uint8 decHdr[4];
-    memcpy(decHdr, rawHeader, 4);
-    _recvDecrypt.UpdateData(decHdr, 4);
-
-    uint16 sizeDec = readU16BE(decHdr);
-    uint16 cmdDec = (uint16(decHdr[2]) | (uint16(decHdr[3]) << 8));
-
-    std::cerr << "[WorldSocket] decrypted response: size=" << sizeDec
-              << " cmd=0x" << std::hex << cmdDec << std::dec << "\n";
-
-    if (cmdDec != Opcodes::SMSG_AUTH_RESPONSE)
+    if (cmd != Opcodes::SMSG_AUTH_RESPONSE)
     {
         std::cerr << "[WorldSocket] Expected SMSG_AUTH_RESPONSE (0x1EE), got 0x"
-                  << std::hex << cmdDec << std::dec << " (encrypted read)\n";
+                  << std::hex << cmd << std::dec << " after decryption\n";
         return false;
     }
 
-    // Body is NOT encrypted — only headers are encrypted in AzerothCore
-    size_t bodyLen = (sizeDec >= sizeof(uint16)) ? (sizeDec - sizeof(uint16)) : 0;
+    // Body is plaintext — only the header was encrypted
+    size_t bodyLen = (size >= sizeof(uint16)) ? (size - sizeof(uint16)) : 0;
     std::vector<uint8> body;
     if (bodyLen > 0)
     {
         body.resize(bodyLen);
         if (!ReadExact(body.data(), bodyLen))
+        {
+            std::cerr << "[WorldSocket] Failed to read auth response body ("
+                      << bodyLen << " bytes)\n";
             return false;
+        }
 
         std::cerr << "[WorldSocket] auth body (" << bodyLen << " bytes): ";
         for (size_t i = 0; i < std::min(bodyLen, size_t(32)); ++i)
@@ -652,8 +617,9 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
         if (bodyLen > 32) std::cerr << "...";
         std::cerr << std::dec << "\n";
     }
+
     result = body.empty() ? 0 : body[0];
-    std::cerr << "[WorldSocket] auth result=" << int(result) << " (encrypted)\n";
+    std::cerr << "[WorldSocket] auth result=" << int(result) << "\n";
 
     if (result != 0)
     {
@@ -661,7 +627,6 @@ bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags)
         return false;
     }
 
-    // Encryption is already initialized from InitAuthCrypt above
     return true;
 }
 
