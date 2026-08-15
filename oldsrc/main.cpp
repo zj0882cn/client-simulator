@@ -41,6 +41,8 @@ struct BotConfig
     std::string prefix = "BOT";
     std::string password;
     int spawnIntervalMs = 500;
+    std::string authHost = "127.0.0.1";
+    uint16 authPort = 3724;
 };
 
 static BotConfig LoadConfig(std::string const& filePath)
@@ -76,6 +78,8 @@ static BotConfig LoadConfig(std::string const& filePath)
         else if (key == "BOT_USERNAME_PREFIX") conf.prefix = val;
         else if (key == "BOT_PASSWORD")      conf.password = val;
         else if (key == "BOT_SPAWN_INTERVAL_MS") conf.spawnIntervalMs = std::stoi(val);
+        else if (key == "AUTH_HOST")         conf.authHost = val;
+        else if (key == "AUTH_PORT")         conf.authPort = uint16(std::atoi(val.c_str()));
     }
     return conf;
 }
@@ -86,12 +90,16 @@ static constexpr int MAX_RECONNECT_RETRIES = 10;
 static constexpr int INITIAL_RETRY_WAIT_SEC = 2;
 static constexpr int MAX_RETRY_WAIT_SEC = 60;
 
-void BotThread(int botIndex, BotConfig const& conf, std::string const& authHost, uint16 authPort)
+void BotThread(int botIndex, int totalBots, BotConfig const& conf, std::string const& authHost, uint16 authPort)
 {
     g_activeBots++;
 
-    // 构造用户名: BOT001, BOT002, ...
-    std::string username = conf.prefix + (botIndex < 10 ? "00" : botIndex < 100 ? "0" : "") + std::to_string(botIndex);
+    // 构造用户名: 单 bot 直接用 prefix, 多 bot 拼接序号 BOT001, BOT002, ...
+    std::string username;
+    if (totalBots <= 1)
+        username = conf.prefix;
+    else
+        username = conf.prefix + (botIndex < 10 ? "00" : botIndex < 100 ? "0" : "") + std::to_string(botIndex);
     std::cout << "\n=== Bot #" << botIndex << " [" << username << "] 启动 ===\n";
 
     int retryCount = 0;
@@ -323,8 +331,8 @@ int main(int argc, char** argv)
     if (botCount <= 0 || botCount > conf.count)
         botCount = conf.count;
 
-    std::string authHost = "127.0.0.1";
-    uint16 authPort = 3724;
+    std::string authHost = conf.authHost;
+    uint16 authPort = conf.authPort;
 
     char const* envHost = getenv("AUTH_HOST");
     if (envHost) authHost = envHost;
@@ -337,7 +345,7 @@ int main(int argc, char** argv)
     std::vector<std::thread> threads;
     for (int i = 1; i <= botCount; ++i)
     {
-        threads.emplace_back(BotThread, i, std::ref(conf), authHost, authPort);
+        threads.emplace_back(BotThread, i, botCount, std::ref(conf), authHost, authPort);
         std::this_thread::sleep_for(std::chrono::milliseconds(conf.spawnIntervalMs));
     }
 
