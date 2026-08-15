@@ -480,7 +480,7 @@ bool WorldSocket::SendAuthSession(AuthResult const& auth, std::string const& use
     std::string normUser = user;
     std::transform(normUser.begin(), normUser.end(), normUser.begin(), ::toupper);
 
-    // digest = SHA1(account + [0,0,0,0] + clientSeed(4) + serverSeed(4) + sessionKey(40))
+    // WoW 3.3.5a digest = SHA1(account + [0,0,0,0] + clientSeed(4) + serverSeed(4) + sessionKey(40))
     Acore::Crypto::SHA1::Digest digest;
     {
         Acore::Crypto::SHA1 ctx;
@@ -494,31 +494,51 @@ bool WorldSocket::SendAuthSession(AuthResult const& auth, std::string const& use
         digest = ctx.GetDigest();
     }
 
-    // WoW 3.3.5a CMSG_AUTH_SESSION format:
-    //   string  accountName (null-terminated)
-    //   uint8   digest[20]
-    //   uint32  seed (client seed, LE)
-    //   uint8   realmId
-    //   uint32  addonInfoSize (0 = empty)
-    std::vector<uint8> payload;
-    payload.reserve(normUser.size() + 1 + 20 + 4 + 1 + 4);
+    std::cerr << "[WorldSocket] digest computation: SHA1("
+              << normUser << " + zeros + clientSeed=";
+    for (int i = 0; i < 4; ++i) std::cerr << std::hex << (int)_clientSeed[i];
+    std::cerr << " + serverSeed=";
+    for (int i = 0; i < 4; ++i) std::cerr << std::hex << (int)_serverSeed[i];
+    std::cerr << " + sessionKey=";
+    for (int i = 0; i < 16; ++i) std::cerr << std::hex << (int)auth.sessionKey[i];
+    std::cerr << "...)\n";
+    std::cerr << "[WorldSocket] computed digest: ";
+    for (int i = 0; i < 20; ++i) std::cerr << std::hex << (int)digest[i];
+    std::cerr << std::dec << "\n";
 
-    // Account name (null-terminated)
+    uint32 build = 12340;
+    uint32 serverId = 0;
+    uint32 loginServerType = 0; // GRUNT
+    uint32 regionId = 2;   // US
+    uint32 battlegroupId = 1;
+    uint64 dosResponse = 0;
+
+    std::vector<uint8> payload;
+    auto pushU32 = [&](uint32 v) {
+        uint8 buf[4];
+        writeU32LE(buf, v);
+        payload.insert(payload.end(), buf, buf + 4);
+    };
+    auto pushU64 = [&](uint64 v) {
+        uint8 buf[8];
+        writeU64LE(buf, v);
+        payload.insert(payload.end(), buf, buf + 8);
+    };
+
+    payload.reserve(4 + 4 + normUser.size() + 1 + 4 + 4 + 4 + 4 + 1 + 8 + 20 + 4);
+    pushU32(build);
+    pushU32(serverId);
     payload.insert(payload.end(), normUser.begin(), normUser.end());
     payload.push_back(0);
-
-    // Digest (20 bytes)
-    payload.insert(payload.end(), digest.data(), digest.data() + 20);
-
-    // Client seed (4 bytes LE)
-    uint8 seedBuf[4];
-    writeU32LE(seedBuf, readU32LE(_clientSeed));
-    payload.insert(payload.end(), seedBuf, seedBuf + 4);
-
-    // Realm ID (1 byte)
+    pushU32(loginServerType);
+    payload.insert(payload.end(), _clientSeed, _clientSeed + 4);
+    pushU32(regionId);
+    pushU32(battlegroupId);
     payload.push_back(realmId);
+    pushU64(dosResponse);
+    payload.insert(payload.end(), digest.data(), digest.data() + digest.size());
 
-    // Addon info size (4 bytes LE, 0 = no addons)
+    // Addon info size (0 = no addons)
     uint8 addonBuf[4] = { 0, 0, 0, 0 };
     payload.insert(payload.end(), addonBuf, addonBuf + 4);
 
