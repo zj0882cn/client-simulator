@@ -114,14 +114,22 @@ namespace WoWClient
         writeU16LE(p, build_); p += 2;
         // platform "x86\0"
         memcpy(p, "x86", 3); p[3] = 0; p += 4;
-        // os: AzerothCore reverses bytes on storage, so we send reversed: "Win\0" -> "\0niW"
-        p[0] = 0;    // reverse of "Win\0"
-        p[1] = 'n';
-        p[2] = 'i';
-        p[3] = 'W';
+        // os: 网络上以反转顺序发送 "OSX" -> "XSO\0" (末尾补 '\0')
+        // AzerothCore 收到后 std::reverse 恢复为 "OSX" 并存入数据库 account.os。
+        // 注意: 使用 OSX 而非 Win 是有意为之 —— AzerothCore 的 Warden 反作弊
+        //       系统仅对 "Win" 客户端启用, 而 OSX 分支在 InitWarden 中被禁用。
+        //       若发 "Win", 服务器会周期性发送 SMSG_WARDEN_DATA 检查, 模拟器
+        //       无法响应, 约 30 秒后会被踢出。
+        // 字节序: 不能像旧代码那样发 "\0niW"(开头补0), 否则服务器 os.data()
+        //         首字节为 '\0', 反转后 _os 为空字符串, world 阶段 warden 检查
+        //         (account.OS != "Win" && != "OSX") 失败, 返回 AUTH_REJECT(14)。
+        p[0] = 'X';
+        p[1] = 'S';
+        p[2] = 'O';
+        p[3] = 0;
         p += 4;
-        // country "enUS"
-        memcpy(p, "enUS", 4); p += 4;
+        // country "enUS" 以反转顺序发送 "SUne"
+        memcpy(p, "SUne", 4); p += 4;
         // timezone bias
         writeU32LE(p, 0); p += 4;
         // IP (0.0.0.0)
@@ -151,7 +159,7 @@ namespace WoWClient
         if (!RecvAll(&opcode, 1) || !RecvAll(&errPlaceholder, 1) || !RecvAll(&errorCode, 1))
             return false;
 
-        if (opcode != CMD_AUTH_LOGON_CHALLENGE || errorCode != AUTH_OK) {
+        if (opcode != CMD_AUTH_LOGON_CHALLENGE || errorCode != WOW_SUCCESS) {
             std::cerr << "[Auth] Challenge failed: opcode=" << int(opcode) << " err_ph=" << int(errPlaceholder) << " error=" << int(errorCode) << "\n";
             result_.errorCode = errorCode;
             return false;
@@ -242,7 +250,7 @@ namespace WoWClient
 
         uint8 result;
         if (!RecvAll(&result, 1)) return false;
-        if (result != AUTH_OK) {
+        if (result != WOW_SUCCESS) {
             std::cerr << "[Auth] Proof failed: result=" << int(result) << "\n";
             result_.errorCode = result;
             return false;

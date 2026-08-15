@@ -109,6 +109,8 @@ namespace WoWClient
 #endif
 
         encrypted_ = false;
+        recvBuf_.clear();
+        connClosed_ = false;
         std::cout << "[World] Connected to " << ip_ << ":" << port_ << "\n";
         return true;
     }
@@ -116,9 +118,11 @@ namespace WoWClient
     void WorldSocket::Disconnect() {
         if (fd_ != SOCKET_INVALID) { CLOSE_SOCKET(fd_); fd_ = SOCKET_INVALID; }
         encrypted_ = false;
+        recvBuf_.clear();
+        connClosed_ = true;
     }
 
-    bool WorldSocket::IsConnected() const { return fd_ != SOCKET_INVALID; }
+    bool WorldSocket::IsConnected() const { return fd_ != SOCKET_INVALID && !connClosed_; }
 
     void WorldSocket::SetUsername(const std::string& un) { username_ = un; }
 
@@ -266,24 +270,28 @@ namespace WoWClient
                     body.resize(bodyLen);
                     if (!ReadExact(body.data(), bodyLen)) return false;
                 }
-                result = body.empty() ? 0 : body[0];
-                std::cerr << "[World] WaitAuthResponse: auth response=" << (int)result << " (unencrypted)\n";
-                if (result == 0)
+                result = body.empty() ? AUTH_OK : body[0];
+                std::cerr << "[World] WaitAuthResponse: auth response=" << (int)result
+                          << " (" << authResponseName(result) << ") (unencrypted)\n";
+                if (isAuthResponseOk(result))
                     InitEncryption();
                 return true;
             }
         }
 
-        // 阶段 2: 初始化加密并重试解密
+        // 阶段 2: 初始化加密,循环读取直到收到 SMSG_AUTH_RESPONSE
+        // 认证成功后服务器可能先发送 SMSG_WARDEN_DATA 等加密包,
+        // AUTH_RESPONSE 在异步数据库查询完成后才发送,因此需要跳过非认证包继续等待。
         InitEncryption();
 
-        {
-            uint8 hdr[4];
-            memcpy(hdr, rawHeader, 4);
-            recvDecrypt_.UpdateData(hdr, 4);
-            uint16 sizeRaw = readU16BE(hdr);
-            cmd = uint16(hdr[2]) | (uint16(hdr[3]) << 8);
+        uint8 hdr[4];
+        memcpy(hdr, rawHeader, 4);
+        recvDecrypt_.UpdateData(hdr, 4);
+        uint16 sizeRaw = readU16BE(hdr);
+        cmd = uint16(hdr[2]) | (uint16(hdr[3]) << 8);
 
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        for (;;) {
             std::cerr << "[World] WaitAuthResponse: decrypted try: cmd=0x" << std::hex << cmd << std::dec << " size=" << sizeRaw << "\n";
 
             if (cmd == SMSG_AUTH_RESPONSE) {
@@ -292,15 +300,33 @@ namespace WoWClient
                     body.resize(bodyLen);
                     if (!ReadExact(body.data(), bodyLen)) return false;
                 }
-                result = body.empty() ? 0 : body[0];
-                std::cerr << "[World] WaitAuthResponse: auth response=" << (int)result << " (encrypted)\n";
+                result = body.empty() ? AUTH_OK : body[0];
+                std::cerr << "[World] WaitAuthResponse: auth response=" << (int)result
+                          << " (" << authResponseName(result) << ") (encrypted)\n";
                 return true;
             }
-        }
 
-        std::cerr << "[World] WaitAuthResponse: expected SMSG_AUTH_RESPONSE, got 0x"
-                  << std::hex << cmd << std::dec << "\n";
-        return false;
+            // 跳过非 AUTH_RESPONSE 包(如 SMSG_WARDEN_DATA): 读取并丢弃 body
+            std::cerr << "[World] WaitAuthResponse: skipping packet cmd=0x"
+                      << std::hex << cmd << std::dec << " (size=" << sizeRaw << ")\n";
+            if (sizeRaw >= sizeof(uint16)) {
+                size_t bodyLen = sizeRaw - sizeof(uint16);
+                std::vector<uint8> skipBody(bodyLen);
+                if (bodyLen > 0 && !ReadExact(skipBody.data(), bodyLen)) return false;
+            }
+
+            // 读取下一个包头
+            uint8 nextHdr[4];
+            if (!ReadExact(nextHdr, 4)) return false;
+            recvDecrypt_.UpdateData(nextHdr, 4);
+            sizeRaw = readU16BE(nextHdr);
+            cmd = uint16(nextHdr[2]) | (uint16(nextHdr[3]) << 8);
+
+            if (std::chrono::steady_clock::now() > deadline) {
+                std::cerr << "[World] WaitAuthResponse: timed out waiting for SMSG_AUTH_RESPONSE\n";
+                return false;
+            }
+        }
     }
 
     bool WorldSocket::RecvCharacterList(std::vector<CharacterInfo>& chars) {
@@ -455,19 +481,80 @@ namespace WoWClient
     }
 
     bool WorldSocket::SendPing(uint32 seq) {
-        std::vector<uint8> payload(4);
+        // CMSG_PING 格式: uint32 ping(序号) + uint32 latency(延迟)
+        // 服务器 HandlePing 读取 ping + latency 两个 uint32, 缺失会导致解析异常
+        std::vector<uint8> payload(8);
         writeU32LE(payload.data(), seq);
+        writeU32LE(payload.data() + 4, 0);  // latency
         if (!SendPacket(CMSG_PING, payload)) return false;
 
+        // 用非阻塞收包模式等待 PONG, 避免阻塞主循环
         uint16 cmd;
         std::vector<uint8> body;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (std::chrono::steady_clock::now() < deadline) {
-            if (RecvPacket(cmd, body)) {
+            if (RecvPacketNonBlocking(cmd, body)) {
                 if (cmd == SMSG_PONG) return true;
             }
+            if (connClosed_) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         return false;
+    }
+
+    // 响应服务器的 SMSG_TIME_SYNC_REQ: 发送 CMSG_TIME_SYNC_RESP
+    // 格式: uint32 counter + uint32 clientTimestamp(客户端毫秒时间戳)
+    // 服务器每 5~10 秒发送一次, 若长时间不响应可能被视为异常连接
+    bool WorldSocket::SendTimeSyncResponse(uint32 counter) {
+        std::vector<uint8> payload(8);
+        writeU32LE(payload.data(), counter);
+        uint32 clientTime = uint32(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        writeU32LE(payload.data() + 4, clientTime);
+        if (!SendPacket(CMSG_TIME_SYNC_RESP, payload)) return false;
+        std::cout << "[World] TimeSync response sent (counter=" << counter << ")\n";
+        return true;
+    }
+
+    void WorldSocket::SetMover(uint64 guid, const Vec3& pos, float orientation) {
+        moverGuid_ = guid;
+        moverPos_ = pos;
+        moverO_ = orientation;
+    }
+
+    // 发送 CMSG_MOVE_HEARTBEAT 移动心跳包
+    // 正常客户端即使角色静止也会周期发送移动包, 服务器据此判断客户端存活。
+    // 模拟器若不发送, 服务器可能判定角色卡死/无响应而踢出。
+    // 格式: uint64 guid + MovementInfo{ flags=0, time, x,y,z,o, fallTime=0 }
+    bool WorldSocket::SendMoveHeartbeat() {
+        if (moverGuid_ == 0) {
+            std::cerr << "[World] SendMoveHeartbeat: moverGuid_ == 0\n";
+            return false;
+        }
+
+        std::vector<uint8> payload;
+        auto pushU32 = [&](uint32 v) { uint8 b[4]; writeU32LE(b, v); payload.insert(payload.end(), b, b+4); };
+        auto pushF32 = [&](float f) { uint8 b[4]; writeU32LE(b, *reinterpret_cast<uint32*>(&f)); payload.insert(payload.end(), b, b+4); };
+
+        uint8 guidBuf[8];
+        writeU64LE(guidBuf, moverGuid_);
+        payload.insert(payload.end(), guidBuf, guidBuf + 8);
+
+        pushU32(0);  // MOVEMENTFLAG_NONE
+        uint32 moveTime = uint32(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count() & 0xFFFFFFFF);
+        pushU32(moveTime);
+        pushF32(moverPos_.x);
+        pushF32(moverPos_.y);
+        pushF32(moverPos_.z);
+        pushF32(moverO_);
+        pushU32(0);  // fallTime
+
+        if (!SendPacket(CMSG_MOVE_HEARTBEAT, payload)) {
+            std::cerr << "[World] SendMoveHeartbeat: SendPacket failed\n";
+            return false;
+        }
+        return true;
     }
 
     bool WorldSocket::SendChatMessage(const std::string& msg, uint8 channel) {
@@ -501,8 +588,59 @@ namespace WoWClient
     }
 
     bool WorldSocket::RecvPacketNonBlocking(uint16& cmd, std::vector<uint8>& payload) {
-        if (!HasPendingData(0)) return false;
-        return RecvPacket(cmd, payload);
+        // 1. 非阻塞读取所有可用数据到接收缓冲区
+        uint8 tmp[4096];
+        for (;;) {
+#ifdef _WIN32
+            int flags = 0;
+#else
+            int flags = MSG_DONTWAIT;
+#endif
+            ssize_t n = ::recv(fd_, tmp, sizeof(tmp), flags);
+            if (n > 0) {
+                recvBuf_.insert(recvBuf_.end(), tmp, tmp + n);
+            } else if (n == 0) {
+                // 服务器关闭连接
+                connClosed_ = true;
+                return false;
+            } else {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK || err == WSAETIMEDOUT) break;
+                if (err == WSAEINTR) continue;
+#else
+                int err = errno;
+                if (err == EAGAIN || err == EWOULDBLOCK) break;
+                if (err == EINTR) continue;
+#endif
+                return false;
+            }
+        }
+
+        // 2. 检查缓冲区中是否有完整包 (至少 4 字节 header)
+        if (recvBuf_.size() < 4) return false;
+
+        // 3. 解密 header (WoW 只加密 header 4 字节)
+        uint8 hdr[4];
+        memcpy(hdr, recvBuf_.data(), 4);
+        if (encrypted_) recvDecrypt_.UpdateData(hdr, 4);
+
+        uint16 size = readU16BE(hdr);
+        cmd = uint16(hdr[2]) | (uint16(hdr[3]) << 8);
+        if (size < sizeof(uint16)) return false;
+
+        // 4. 包总长 = header(4) + body(size-2), 检查是否完整
+        size_t totalLen = 4 + (size - sizeof(uint16));
+        if (recvBuf_.size() < totalLen) return false;  // 包不完整, 等待更多数据
+
+        // 5. 解析 payload (body 为明文)
+        size_t bodyLen = size - sizeof(uint16);
+        payload.assign(recvBuf_.begin() + 4, recvBuf_.begin() + 4 + bodyLen);
+
+        // 6. 从缓冲区移除已消费的包
+        recvBuf_.erase(recvBuf_.begin(), recvBuf_.begin() + totalLen);
+
+        return true;
     }
 
     // ---- Private implementations ----
@@ -578,7 +716,16 @@ namespace WoWClient
 
     bool WorldSocket::ReadExact(void* buf, size_t len) {
         size_t received = 0;
+        int blockWaitCount = 0;
+        auto readStart = std::chrono::steady_clock::now();
         while (received < len) {
+            // 总超时保护: 单个包读取超过 3 秒则放弃, 避免无限阻塞主循环
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - readStart).count() > 3000) {
+                std::cerr << "[World] ReadExact: total 3s timeout reading " << len
+                          << " bytes, got " << received << "\n";
+                return false;
+            }
             ssize_t n = ::recv(fd_, (char*)buf + received, len - received, 0);
             if (n < 0) {
 #ifdef _WIN32
@@ -588,14 +735,17 @@ namespace WoWClient
                 int err = errno;
                 if (err == EAGAIN || err == EWOULDBLOCK || err == ETIMEDOUT) {
 #endif
+                    // 短等待 100ms 重试, 避免长时间阻塞主循环导致无法发送心跳/Ping
                     fd_set fds;
                     FD_ZERO(&fds);
                     FD_SET(fd_, &fds);
-                    struct timeval tv{1, 0};
+                    struct timeval tv{0, 100000};
                     int ret = select((int)fd_ + 1, &fds, nullptr, nullptr, &tv);
                     if (ret <= 0) {
                         if (ret == 0) {
-                            std::cerr << "[World] ReadExact: timeout after 1s waiting for data (" << received << "/" << len << " bytes)\n";
+                            ++blockWaitCount;
+                            if (blockWaitCount <= 3)
+                                std::cerr << "[World] ReadExact: waiting for data (" << received << "/" << len << " bytes) block#" << blockWaitCount << "\n";
                         } else {
                             std::cerr << "[World] ReadExact: select error: " << SOCKET_ERROR_MSG() << "\n";
                         }

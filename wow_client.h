@@ -107,8 +107,70 @@ namespace WoWClient
     constexpr uint8 CMD_AUTH_LOGON_CHALLENGE = 0x00;
     constexpr uint8 CMD_AUTH_LOGON_PROOF      = 0x01;
     constexpr uint8 CMD_REALM_LIST            = 0x10;
-    constexpr uint8 AUTH_OK                   = 0x00;
     constexpr uint8 WOW_SUCCESS               = 0x00;
+
+    // SMSG_AUTH_RESPONSE 状态码 (对应 AzerothCore ResponseCodes 枚举)
+    // 注意: 认证成功的码是 AUTH_OK = 0x0C (12), 而不是 0!
+    // 旧代码误将 AUTH_OK 定义为 0, 导致服务器返回 12 (成功) 时被误判为失败
+    constexpr uint8 AUTH_OK                   = 0x0C;
+    constexpr uint8 AUTH_FAILED               = 0x0D;
+    constexpr uint8 AUTH_REJECT               = 0x0E;
+    constexpr uint8 AUTH_BAD_SERVER_PROOF     = 0x0F;
+    constexpr uint8 AUTH_UNAVAILABLE          = 0x10;
+    constexpr uint8 AUTH_SYSTEM_ERROR         = 0x11;
+    constexpr uint8 AUTH_BILLING_ERROR        = 0x12;
+    constexpr uint8 AUTH_BILLING_EXPIRED      = 0x13;
+    constexpr uint8 AUTH_VERSION_MISMATCH     = 0x14;
+    constexpr uint8 AUTH_UNKNOWN_ACCOUNT      = 0x15;
+    constexpr uint8 AUTH_INCORRECT_PASSWORD   = 0x16;
+    constexpr uint8 AUTH_SESSION_EXPIRED      = 0x17;
+    constexpr uint8 AUTH_SERVER_SHUTTING_DOWN = 0x18;
+    constexpr uint8 AUTH_ALREADY_LOGGING_IN   = 0x19;
+    constexpr uint8 AUTH_WAIT_QUEUE           = 0x1B;
+    constexpr uint8 AUTH_BANNED               = 0x1C;
+    constexpr uint8 AUTH_ALREADY_ONLINE       = 0x1D;
+    constexpr uint8 AUTH_NO_TIME              = 0x1E;
+    constexpr uint8 AUTH_DB_BUSY              = 0x1F;
+    constexpr uint8 AUTH_SUSPENDED            = 0x20;
+    constexpr uint8 AUTH_PARENTAL_CONTROL     = 0x21;
+    constexpr uint8 AUTH_LOCKED_ENFORCED      = 0x22;
+    constexpr uint8 REALM_LIST_REALM_NOT_FOUND = 0x27;
+
+    // 将 SMSG_AUTH_RESPONSE 状态码映射为可读名称
+    inline const char* authResponseName(uint8 code) {
+        switch (code) {
+            case WOW_SUCCESS:               return "WOW_SUCCESS";
+            case AUTH_OK:                   return "AUTH_OK";
+            case AUTH_FAILED:               return "AUTH_FAILED";
+            case AUTH_REJECT:               return "AUTH_REJECT";
+            case AUTH_BAD_SERVER_PROOF:     return "AUTH_BAD_SERVER_PROOF";
+            case AUTH_UNAVAILABLE:          return "AUTH_UNAVAILABLE";
+            case AUTH_SYSTEM_ERROR:         return "AUTH_SYSTEM_ERROR";
+            case AUTH_BILLING_ERROR:        return "AUTH_BILLING_ERROR";
+            case AUTH_BILLING_EXPIRED:      return "AUTH_BILLING_EXPIRED";
+            case AUTH_VERSION_MISMATCH:     return "AUTH_VERSION_MISMATCH";
+            case AUTH_UNKNOWN_ACCOUNT:      return "AUTH_UNKNOWN_ACCOUNT";
+            case AUTH_INCORRECT_PASSWORD:   return "AUTH_INCORRECT_PASSWORD";
+            case AUTH_SESSION_EXPIRED:      return "AUTH_SESSION_EXPIRED";
+            case AUTH_SERVER_SHUTTING_DOWN: return "AUTH_SERVER_SHUTTING_DOWN";
+            case AUTH_ALREADY_LOGGING_IN:   return "AUTH_ALREADY_LOGGING_IN";
+            case AUTH_WAIT_QUEUE:           return "AUTH_WAIT_QUEUE";
+            case AUTH_BANNED:               return "AUTH_BANNED";
+            case AUTH_ALREADY_ONLINE:       return "AUTH_ALREADY_ONLINE";
+            case AUTH_NO_TIME:              return "AUTH_NO_TIME";
+            case AUTH_DB_BUSY:              return "AUTH_DB_BUSY";
+            case AUTH_SUSPENDED:            return "AUTH_SUSPENDED";
+            case AUTH_PARENTAL_CONTROL:     return "AUTH_PARENTAL_CONTROL";
+            case AUTH_LOCKED_ENFORCED:      return "AUTH_LOCKED_ENFORCED";
+            case REALM_LIST_REALM_NOT_FOUND:return "REALM_LIST_REALM_NOT_FOUND";
+            default:                        return "UNKNOWN";
+        }
+    }
+
+    // 判断 SMSG_AUTH_RESPONSE 状态码是否为成功
+    inline bool isAuthResponseOk(uint8 code) {
+        return code == AUTH_OK || code == WOW_SUCCESS;
+    }
 
     // World client opcodes (CMSG_*)
     constexpr uint32 CMSG_AUTH_SESSION       = 0x01ED;
@@ -118,6 +180,9 @@ namespace WoWClient
     constexpr uint32 CMSG_SET_ACTIVE_MOVER   = 0x026A;
     constexpr uint32 CMSG_MESSAGECHAT        = 0x0095;
     constexpr uint32 CMSG_LOGOUT             = 0x004B;
+    constexpr uint32 CMSG_TIME_SYNC_RESP     = 0x0391;
+    constexpr uint32 CMSG_MOVE_HEARTBEAT     = 0x00EE;
+    constexpr uint32 CMSG_NAME_QUERY         = 0x0050;
 
     // World server opcodes (SMSG_*)
     constexpr uint16 SMSG_AUTH_CHALLENGE    = 0x01EC;
@@ -132,6 +197,7 @@ namespace WoWClient
     constexpr uint16 SMSG_NEW_WORLD         = 0x003E;
     constexpr uint16 SMSG_TRANSFER_PENDING  = 0x003F;
     constexpr uint16 SMSG_TRANSFER_ABORTED = 0x0040;
+    constexpr uint16 SMSG_TIME_SYNC_REQ     = 0x0390;
 
     // =========================================================================
     // 数据结构
@@ -539,6 +605,9 @@ namespace WoWClient
         bool WaitWorldEnter();
         bool SendActiveMover(uint64 guid);
         bool SendPing(uint32 seq);
+        bool SendTimeSyncResponse(uint32 counter);
+        bool SendMoveHeartbeat();
+        void SetMover(uint64 guid, const Vec3& pos, float orientation);
         bool SendChatMessage(const std::string& msg, uint8 channel = 0);
         bool HasPendingData(uint32 timeoutMs);
         bool RecvPacketNonBlocking(uint16& cmd, std::vector<uint8>& payload);
@@ -555,6 +624,11 @@ namespace WoWClient
         ARC4 sendEncrypt_;
         ARC4 recvDecrypt_;
         std::string username_;
+        uint64 moverGuid_ = 0;
+        Vec3 moverPos_;
+        float moverO_ = 0.0f;
+        std::vector<uint8> recvBuf_;   // 非阻塞收包缓冲区
+        bool connClosed_ = false;      // 服务器是否已关闭连接
 
         bool SendPacket(uint16 cmd, const std::vector<uint8>& payload, bool skipEncrypt = false);
         bool RecvPacket(uint16& cmd, std::vector<uint8>& payload);

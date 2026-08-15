@@ -241,8 +241,24 @@ int runLoginLoop(const Args& args) {
         return 1;
     }
 
-    if (authResp != 0) {
-        std::cerr << "[-] Auth response error: " << (int)authResp << "\n";
+    if (!isAuthResponseOk(authResp)) {
+        std::cerr << "[-] Auth response error: " << (int)authResp
+                  << " (" << authResponseName(authResp) << ")\n";
+        if (authResp == AUTH_REJECT) {
+            std::cerr << "    [提示] 服务器拒绝认证 (AUTH_REJECT),常见原因:\n";
+            std::cerr << "    - 世界服务器 (worldserver) 未运行,或处于关闭/维护状态\n";
+            std::cerr << "    - Warden 检查失败(账号 OS 字段不是 Win/OSX)\n";
+            std::cerr << "    - 客户端 IP 被服务器封禁\n";
+            std::cerr << "    建议检查服务器端 worldserver 进程状态和日志。\n";
+        } else if (authResp == AUTH_VERSION_MISMATCH) {
+            std::cerr << "    [提示] 客户端版本与服务器不匹配,请检查 WOW_BUILD (当前: " << WOW_BUILD << ")\n";
+        } else if (authResp == AUTH_UNKNOWN_ACCOUNT) {
+            std::cerr << "    [提示] 账号不存在或 worldserver 数据库中无此账号\n";
+        } else if (authResp == AUTH_INCORRECT_PASSWORD) {
+            std::cerr << "    [提示] 密码错误或 SRP6 会话密钥不匹配\n";
+        } else if (authResp == AUTH_ALREADY_ONLINE) {
+            std::cerr << "    [提示] 该账号已在世界服务器在线\n";
+        }
         return 1;
     }
 
@@ -299,6 +315,7 @@ int runLoginLoop(const Args& args) {
     }
 
     world.SendActiveMover(chosen->guid);
+    world.SetMover(chosen->guid, chosen->pos, 0.0f);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     // Drain initial login packets
@@ -311,6 +328,9 @@ int runLoginLoop(const Args& args) {
         if (cmd == SMSG_LOGOUT_COMPLETE) {
             std::cerr << "[-] Kicked during login\n";
             return 1;
+        }
+        if (cmd == SMSG_TIME_SYNC_REQ && payload.size() >= 4) {
+            world.SendTimeSyncResponse(readU32LE(payload.data()));
         }
     }
 
@@ -332,17 +352,38 @@ int runLoginLoop(const Args& args) {
     // ---- Step 5: 保活循环 ----
     std::cout << "\n[*] Starting keep-alive loop (Ctrl+C to stop)...\n\n";
 
+    // 进入世界后立即发送一次移动心跳, 验证客户端→服务器加密发送正常
+    std::cout << "[*] Test immediate move heartbeat...\n" << std::flush;
+    if (world.SendMoveHeartbeat()) {
+        std::cout << "[+] Immediate move heartbeat OK\n" << std::flush;
+    } else {
+        std::cerr << "[-] Immediate move heartbeat FAILED\n" << std::flush;
+    }
+
     uint32 pingSeq = 0;
     int pingFailCount = 0;
     auto lastPing = std::chrono::steady_clock::now();
+    auto lastMove = std::chrono::steady_clock::now();
+    int heartbeatCount = 0;
 
+    long loopCount = 0;
     while (g_running && world.IsConnected()) {
+        ++loopCount;
+
+        // 内层循环每轮最多处理 32 个包, 避免被持续到达的更新包
+        // (如 SMSG_MONSTER_MOVE) 阻塞, 确保能执行移动心跳和 Ping
+        int processed = 0;
         uint16 cmd;
         std::vector<uint8> payload;
-        while (world.RecvPacketNonBlocking(cmd, payload)) {
+        while (processed < 32 && world.RecvPacketNonBlocking(cmd, payload)) {
+            ++processed;
             if (cmd == SMSG_LOGOUT_COMPLETE) {
                 std::cout << "\n[*] Logout complete, exiting...\n";
                 return 0;
+            }
+            // 响应服务器时间同步请求, 避免被判定为异常连接
+            if (cmd == SMSG_TIME_SYNC_REQ && payload.size() >= 4) {
+                world.SendTimeSyncResponse(readU32LE(payload.data()));
             }
         }
 
@@ -352,6 +393,19 @@ int runLoginLoop(const Args& args) {
         }
 
         auto now = std::chrono::steady_clock::now();
+
+        // 定期发送移动心跳包, 模拟正常客户端行为(即使角色静止也持续上报移动状态)
+        auto moveElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMove);
+        if (moveElapsed.count() >= 2000) {
+            if (world.SendMoveHeartbeat()) {
+                if (++heartbeatCount % 3 == 0)
+                    std::cout << "[World] Move heartbeat sent (" << heartbeatCount << ")\n" << std::flush;
+            } else {
+                std::cerr << "[-] Move heartbeat FAILED (guid=" << chosen->guid << ")\n" << std::flush;
+            }
+            lastMove = now;
+        }
+
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPing);
         if (elapsed.count() >= 30000) {
             if (world.SendPing(pingSeq++)) {
