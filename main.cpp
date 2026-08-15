@@ -211,8 +211,8 @@ int runLoginLoop(const Args& args) {
     // IMPORTANT: Auth Server updates session_key asynchronously.
     // We need to wait for the database write to complete before
     // connecting to World Server, otherwise session_key may be NULL.
-    std::cout << "[*] Waiting for session_key sync...\n";
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::cout << "[*] Waiting for session_key sync (2s)...\n";
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
     // ---- Step 2: World 服务器连接 ----
     std::cout << "\n[*] Connecting to World Server " << realm.address << ":" << realm.port << "...\n";

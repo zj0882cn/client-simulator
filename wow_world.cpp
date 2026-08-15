@@ -298,9 +298,10 @@ namespace WoWClient
         uint16 cmd;
         std::vector<uint8> body;
 
-        // Wait for data using select with timeout
+        int attemptCount = 0;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
         while (std::chrono::steady_clock::now() < deadline) {
+            attemptCount++;
             fd_set fds;
             FD_ZERO(&fds);
             FD_SET(fd_, &fds);
@@ -312,6 +313,30 @@ namespace WoWClient
                 return false;
             }
             if (ret == 0) continue;
+
+            // Check if connection is closed by polling
+            uint8 peekBuf[2];
+            int peekRet = recv(fd_, peekBuf, 2, MSG_PEEK | MSG_DONTWAIT);
+            if (peekRet == 0) {
+                std::cerr << "[World] WaitAuthResponse: Connection closed by server (recv returned 0)\n";
+                std::cerr << "[World] This usually means server rejected CMSG_AUTH_SESSION.\n";
+                std::cerr << "[World] Check server logs for [WorldAuth] messages.\n";
+                return false;
+            }
+            if (peekRet < 0) {
+                int err = errno;
+                if (err != EAGAIN && err != EWOULDBLOCK) {
+                    std::cerr << "[World] WaitAuthResponse: recv error: " << strerror(err) << "\n";
+                    return false;
+                }
+                continue;
+            }
+
+            // Log peeked data for debugging
+            if (attemptCount <= 5) {
+                std::cerr << "[World] WaitAuthResponse: peeked " << peekRet << " bytes: "
+                          << std::hex << (int)peekBuf[0] << " " << (int)peekBuf[1] << std::dec << "\n";
+            }
 
             // Try to read the packet (first without decryption)
             if (RecvPacket(cmd, body)) {
