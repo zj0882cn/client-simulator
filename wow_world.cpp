@@ -31,7 +31,6 @@ namespace WoWClient
         memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
 
 #ifdef _WIN32
-        // Windows: use select for non-blocking connect
         u_long mode = 1;
         ioctlsocket(fd_, FIONBIO, &mode);
 #else
@@ -57,7 +56,6 @@ namespace WoWClient
         }
 
 #ifdef _WIN32
-        // Windows: use select to wait for connection
         fd_set fdSet;
         FD_ZERO(&fdSet);
         FD_SET(fd_, &fdSet);
@@ -68,7 +66,6 @@ namespace WoWClient
             return false;
         }
 
-        // Check for connection error
         int soErr = 0;
         int len = sizeof(soErr);
         getsockopt(fd_, SOL_SOCKET, SO_ERROR, (char*)&soErr, &len);
@@ -78,7 +75,6 @@ namespace WoWClient
             return false;
         }
 
-        // Set back to blocking mode
         mode = 0;
         ioctlsocket(fd_, FIONBIO, &mode);
 #else
@@ -103,7 +99,7 @@ namespace WoWClient
 #endif
 
         #ifdef _WIN32
-        DWORD tv = 10000; // 10 seconds in milliseconds
+        DWORD tv = 10000;
         setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
         setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
 #else
@@ -130,27 +126,22 @@ namespace WoWClient
         uint16 cmd;
         std::vector<uint8> body;
 
-        // Retry up to 5 times with 500ms delay to give server time to process
-        // (server does async IP ban check before sending SMSG_AUTH_CHALLENGE)
         for (int attempt = 0; attempt < 5; ++attempt) {
             if (attempt > 0) {
                 std::cerr << "[World] Retrying auth challenge (attempt " << (attempt + 1) << "/5)...\n";
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
 
-            // Wait for data using select
             fd_set fds;
             FD_ZERO(&fds);
             FD_SET(fd_, &fds);
-            struct timeval tv{0, 500000}; // 500ms
+            struct timeval tv{0, 500000};
             int ret = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
             if (ret < 0) {
                 std::cerr << "[World] select error: " << strerror(errno) << "\n";
                 return false;
             }
-            if (ret == 0) {
-                continue; // No data yet, retry
-            }
+            if (ret == 0) continue;
 
             if (RecvPacket(cmd, body)) {
                 if (cmd == SMSG_AUTH_CHALLENGE) {
@@ -160,7 +151,6 @@ namespace WoWClient
                     return true;
                 }
                 std::cerr << "[World] Unexpected packet cmd=0x" << std::hex << cmd << std::dec << " (expected SMSG_AUTH_CHALLENGE)\n";
-                // If we got an auth response instead (e.g., error), parse it
                 if (cmd == SMSG_AUTH_RESPONSE) {
                     std::cerr << "[World] Server sent auth response instead of challenge - possible rejection\n";
                     if (!body.empty()) {
@@ -190,7 +180,6 @@ namespace WoWClient
         SHA1_Update(&sha, auth.sessionKey, 40);
         SHA1_Final(digest, &sha);
 
-        // Debug output
         auto hexStr = [](const uint8* data, size_t len) -> std::string {
             std::string s;
             char buf[3];
@@ -209,22 +198,18 @@ namespace WoWClient
         uint32 build = WOW_BUILD;
         uint32 serverId = 0;
         uint32 loginServerType = 0;
-        uint32 clientSeedVal = readU32LE(clientSeed_);
         uint32 regionId = 2;
         uint32 battlegroupId = 1;
         uint64 dosResponse = 0;
 
         std::vector<uint8> payload;
-        payload.reserve(40 + normUser.size());
-
         auto pushU32 = [&](uint32 v) { uint8 b[4]; writeU32LE(b, v); payload.insert(payload.end(), b, b+4); };
         auto pushU64 = [&](uint64 v) { uint8 b[8]; writeU64LE(b, v); payload.insert(payload.end(), b, b+8); };
 
         pushU32(build);
         pushU32(serverId);
-        // WoW 3.3.5 format: account is null-terminated string
         payload.insert(payload.end(), normUser.begin(), normUser.end());
-        payload.push_back(0);  // null terminator
+        payload.push_back(0);
         pushU32(loginServerType);
         payload.insert(payload.end(), clientSeed_, clientSeed_ + 4);
         pushU32(regionId);
@@ -233,176 +218,104 @@ namespace WoWClient
         pushU64(dosResponse);
         payload.insert(payload.end(), digest, digest + 20);
 
-        // AddonInfo: WoW 3.3.5 uses zlib-compressed addon list
-        // The server reads: [uint32 compressed_size][compressed_data]
-        // We build uncompressed addon data, compress it, then prepend compressed_size.
-        std::vector<uint8> addonRaw;
-        auto pushAddonStr = [&](const std::string& s) {
-            addonRaw.insert(addonRaw.end(), s.begin(), s.end());
-            addonRaw.push_back(0);  // null terminator
-        };
-        auto pushAddonU32 = [&](uint32 v) {
-            uint8 b[4]; writeU32LE(b, v);
-            addonRaw.insert(addonRaw.end(), b, b+4);
-        };
-        auto pushAddonU8 = [&](uint8 v) { addonRaw.push_back(v); };
-
-        uint32 addonCount = 1;
-        pushAddonU32(addonCount);
-        // Addon entry: [name\0][enabled:1][crc:4][unk1:4]
-        pushAddonStr("BlizzardInterface");  // addon name
-        pushAddonU8(1);   // enabled
-        pushAddonU32(0);  // crc
-        pushAddonU32(0);  // unk1
-        // After all addon entries: [currentTime:4]
-        pushAddonU32(0);  // currentTime (server reads this after parsing all addons)
-
-        // zlib-compress the addon data
-        uLongf compressedSize = compressBound(addonRaw.size());
-        std::vector<uint8> addonCompressed(compressedSize);
-        int rc = compress2(addonCompressed.data(), &compressedSize,
-                           addonRaw.data(), addonRaw.size(), Z_DEFAULT_COMPRESSION);
-        if (rc != Z_OK) {
-            std::cerr << "[World] Addon compression failed: " << rc << "\n";
-        } else {
-            addonCompressed.resize(compressedSize);
-            std::cerr << "[World] Addon: raw=" << addonRaw.size() << " compressed=" << compressedSize << "\n";
-        }
-
-        // Server format: [uint32 uncompressed_size][compressed_data]
-        // NOTE: server reads the first uint32 as the UNCOMPRESSED size for uncompress()
-        pushU32((uint32)addonRaw.size());
-        payload.insert(payload.end(), addonCompressed.begin(), addonCompressed.end());
+        // AddonInfo: 简化为 uncompressed_size=0，服务端 ReadAddonsInfo 直接 return
+        // 这样无需发送复杂的压缩 addon 数据
+        uint8 addonSizeBuf[4] = {0, 0, 0, 0};
+        payload.insert(payload.end(), addonSizeBuf, addonSizeBuf + 4);
 
         srpSessionKey_.assign(auth.sessionKey, auth.sessionKey + 40);
         sessionKeyDigest_.assign(digest, digest + 20);
 
-        // Do NOT encrypt CMSG_AUTH_SESSION: server initializes _authCrypt AFTER
-        // processing this packet, so it cannot decrypt it.
         std::cerr << "[World] CMSG_AUTH_SESSION (" << payload.size() << " bytes)\n";
 
         if (!SendPacket(CMSG_AUTH_SESSION, payload, /*skipEncrypt=*/true)) return false;
         std::cout << "[World] Sent CMSG_AUTH_SESSION user=" << normUser << " realmId=" << (int)realmId << " (unencrypted)\n";
 
-        // Read SMSG_AUTH_RESPONSE (unencrypted) before initializing our cipher.
         return true;
     }
 
     bool WorldSocket::WaitAuthResponse(uint8& result, uint32& billingFlags) {
         result = 255; billingFlags = 0;
 
-        // Server sends SMSG_AUTH_RESPONSE. In AzerothCore, the response is sent
-        // UNENCRYPTED before _authCrypt.Init(), but we handle both cases for safety.
+        // 与旧代码一致: 读取 4 字节服务器响应头
+        uint8 rawHeader[4];
+        if (!ReadExact(rawHeader, 4)) {
+            std::cerr << "[World] Failed to read auth response header\n";
+            return false;
+        }
 
-        // Step 1: Try to receive the response packet (unencrypted)
+        std::cerr << "[World] WaitAuthResponse: raw 4 bytes: "
+                  << std::hex << int(rawHeader[0]) << " " << int(rawHeader[1]) << " "
+                  << int(rawHeader[2]) << " " << int(rawHeader[3]) << std::dec << "\n";
+
         uint16 cmd;
         std::vector<uint8> body;
 
-        int attemptCount = 0;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-        while (std::chrono::steady_clock::now() < deadline) {
-            attemptCount++;
-            fd_set fds;
-            FD_ZERO(&fds);
-            FD_SET(fd_, &fds);
-            struct timeval tv{0, 100000}; // 100ms
-            int ret = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
-            if (ret < 0) {
-                if (errno == EINTR) continue;
-                std::cerr << "[World] WaitAuthResponse: select error: " << strerror(errno) << "\n";
-                return false;
-            }
-            if (ret == 0) continue;
+        // 阶段 1: 按未加密头解析
+        {
+            uint8 hdr[4];
+            memcpy(hdr, rawHeader, 4);
+            uint16 sizeRaw = readU16BE(hdr);
+            cmd = uint16(hdr[2]) | (uint16(hdr[3]) << 8);
 
-            // Check if connection is closed by polling
-            uint8 peekBuf[2];
-            int peekRet = recv(fd_, peekBuf, 2, MSG_PEEK | MSG_DONTWAIT);
-            if (peekRet == 0) {
-                std::cerr << "[World] WaitAuthResponse: Connection closed by server (recv returned 0)\n";
-                std::cerr << "[World] This usually means server rejected CMSG_AUTH_SESSION.\n";
-                std::cerr << "[World] Check server logs for [WorldAuth] messages.\n";
-                return false;
-            }
-            if (peekRet < 0) {
-                int err = errno;
-                if (err != EAGAIN && err != EWOULDBLOCK) {
-                    std::cerr << "[World] WaitAuthResponse: recv error: " << strerror(err) << "\n";
-                    return false;
+            std::cerr << "[World] WaitAuthResponse: unencrypted try: cmd=0x" << std::hex << cmd << std::dec << " size=" << sizeRaw << "\n";
+
+            if (cmd == SMSG_AUTH_RESPONSE) {
+                size_t bodyLen = (sizeRaw >= sizeof(uint16)) ? (sizeRaw - sizeof(uint16)) : 0;
+                if (bodyLen > 0) {
+                    body.resize(bodyLen);
+                    if (!ReadExact(body.data(), bodyLen)) return false;
                 }
-                continue;
-            }
-
-            // Log peeked data for debugging
-            if (attemptCount <= 5) {
-                std::cerr << "[World] WaitAuthResponse: peeked " << peekRet << " bytes: "
-                          << std::hex << (int)peekBuf[0] << " " << (int)peekBuf[1] << std::dec << "\n";
-            }
-
-            // Try to read the packet (first without decryption)
-            if (RecvPacket(cmd, body)) {
-                std::cerr << "[World] WaitAuthResponse: received cmd=0x" << std::hex << cmd << std::dec << " size=" << body.size() << "\n";
-
-                if (cmd == SMSG_AUTH_RESPONSE) {
-                    result = body.empty() ? 0 : body[0];
-                    std::cout << "[World] WaitAuthResponse: auth response=" << (int)result << "\n";
-                    // Server enables _authCrypt AFTER sending this response,
-                    // so we must initialize our cipher NOW to match server's state.
+                result = body.empty() ? 0 : body[0];
+                std::cerr << "[World] WaitAuthResponse: auth response=" << (int)result << " (unencrypted)\n";
+                if (result == 0)
                     InitEncryption();
-                    return true;
-                }
-
-                // Unexpected packet - could be encrypted response
-                if (!encrypted_) {
-                    // If we got garbage, the server might have sent encrypted data
-                    // Try interpreting as encrypted
-                    std::cerr << "[World] WaitAuthResponse: unexpected cmd, trying encrypted interpretation...\n";
-
-                    // Re-queue the data by seeking back? No, we already consumed it.
-                    // Instead, let's try a different approach - read raw and decrypt
-                    uint8 rawHeader[5];
-                    memset(rawHeader, 0, sizeof(rawHeader));
-
-                    // We need to peek ahead, but since we already consumed, let's try
-                    // reading the whole thing with decryption.
-                    // Actually, RecvPacket already decrypted if encrypted_ was true.
-                    // If encrypted_ is false and we got garbage, the server sent encrypted data.
-
-                    // Try initializing encryption and reading again
-                    std::cerr << "[World] WaitAuthResponse: initial encryption, retrying with decryption...\n";
-                    InitEncryption();
-
-                    // Now try reading a new packet with decryption
-                    if (RecvPacket(cmd, body)) {
-                        std::cerr << "[World] WaitAuthResponse: decrypted cmd=0x" << std::hex << cmd << std::dec << " size=" << body.size() << "\n";
-                        if (cmd == SMSG_AUTH_RESPONSE) {
-                            result = body.empty() ? 0 : body[0];
-                            std::cout << "[World] WaitAuthResponse: auth response=" << (int)result << " (encrypted)\n";
-                            return true;
-                        }
-                    }
-                }
+                return true;
             }
         }
 
-        std::cerr << "[World] WaitAuthResponse: timeout waiting for SMSG_AUTH_RESPONSE\n";
+        // 阶段 2: 初始化加密并重试解密
+        InitEncryption();
+
+        {
+            uint8 hdr[4];
+            memcpy(hdr, rawHeader, 4);
+            recvDecrypt_.UpdateData(hdr, 4);
+            uint16 sizeRaw = readU16BE(hdr);
+            cmd = uint16(hdr[2]) | (uint16(hdr[3]) << 8);
+
+            std::cerr << "[World] WaitAuthResponse: decrypted try: cmd=0x" << std::hex << cmd << std::dec << " size=" << sizeRaw << "\n";
+
+            if (cmd == SMSG_AUTH_RESPONSE) {
+                size_t bodyLen = (sizeRaw >= sizeof(uint16)) ? (sizeRaw - sizeof(uint16)) : 0;
+                if (bodyLen > 0) {
+                    body.resize(bodyLen);
+                    if (!ReadExact(body.data(), bodyLen)) return false;
+                }
+                result = body.empty() ? 0 : body[0];
+                std::cerr << "[World] WaitAuthResponse: auth response=" << (int)result << " (encrypted)\n";
+                return true;
+            }
+        }
+
+        std::cerr << "[World] WaitAuthResponse: expected SMSG_AUTH_RESPONSE, got 0x"
+                  << std::hex << cmd << std::dec << "\n";
         return false;
     }
 
     bool WorldSocket::RecvCharacterList(std::vector<CharacterInfo>& chars) {
         chars.clear();
 
-        // Drain any pending packets (e.g. SMSG_ADDON_INFO) that were queued
-        // before we sent CMSG_CHAR_ENUM. Use a short non-blocking loop.
+        // Drain any pending packets
         {
             auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
             while (std::chrono::steady_clock::now() < deadline) {
                 uint16 cmd;
                 std::vector<uint8> body;
-                // Try non-blocking read
                 fd_set fds;
                 FD_ZERO(&fds);
                 FD_SET(fd_, &fds);
-                struct timeval tv{0, 50000}; // 50ms
+                struct timeval tv{0, 50000};
                 int ret = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
                 if (ret <= 0) break;
                 if (!RecvPacket(cmd, body)) break;
@@ -431,7 +344,6 @@ namespace WoWClient
         for (uint8 i = 0; i < count; ++i) {
             CharacterInfo ch;
 
-            // ObjectGuid is serialized as raw 8-byte uint64 (not packed)
             ch.guid = readU64LE(body.data() + pos);
             pos += 8;
 
@@ -475,11 +387,6 @@ namespace WoWClient
             if (pos + 4 > body.size()) break;
             ch.flags = readU32LE(body.data() + pos); pos += 4;
 
-            // Skip remaining fields to reach the next character:
-            //   customizeFlags (uint32=4) + firstLogin (uint8=1)
-            //   petDisplayId (uint32=4) + petLevel (uint32=4) + petFamily (uint32=4)
-            //   Equipment cache: INVENTORY_SLOT_BAG_END(23) slots * (uint32+uint8+uint32=9 bytes)
-            //   Total = 4 + 1 + 4 + 4 + 4 + 23*9 = 224 bytes
             if (pos + 224 > body.size()) break;
             pos += 224;
 
@@ -493,7 +400,6 @@ namespace WoWClient
     }
 
     bool WorldSocket::LoginCharacter(uint64 guid) {
-        // Server expects ObjectGuid as raw 8-byte uint64 (same as serialization)
         uint8 guidBytes[8];
         writeU64LE(guidBytes, guid);
         std::vector<uint8> payload(guidBytes, guidBytes + 8);
@@ -565,24 +471,17 @@ namespace WoWClient
     }
 
     bool WorldSocket::SendChatMessage(const std::string& msg, uint8 channel) {
-        // WoW 3.3.5 CMSG_MESSAGECHAT format:
-        //   For SAY (type=0): [type:uint32][lang:uint32][message\0]
-        //   For CHANNEL (type=14): [type:uint32][lang:uint32][channelName\0][message\0]
-        // channel=0 -> SAY (type=0, lang=7=LANG_COMMON)
-        // channel=1 -> CHANNEL (type=14, lang=0)
         std::vector<uint8> payload;
         auto pushU32 = [&](uint32 v) { uint8 b[4]; writeU32LE(b, v); payload.insert(payload.end(), b, b+4); };
 
         if (channel == 1) {
-            // Channel chat
-            pushU32(14);  // CHAT_MSG_CHANNEL
-            pushU32(0);   // lang (ignored for channel)
+            pushU32(14);
+            pushU32(0);
             const char* channelName = "General";
             payload.insert(payload.end(), channelName, channelName + strlen(channelName) + 1);
         } else {
-            // Say chat
-            pushU32(0);   // CHAT_MSG_SAY
-            pushU32(7);   // LANG_COMMON
+            pushU32(0);
+            pushU32(7);
         }
         payload.insert(payload.end(), msg.begin(), msg.end());
         payload.push_back(0);
@@ -609,24 +508,17 @@ namespace WoWClient
     // ---- Private implementations ----
 
     bool WorldSocket::SendPacket(uint16 cmd, const std::vector<uint8>& payload, bool skipEncrypt) {
-        // AzerothCore ClientPktHeader wire format (6 bytes):
-        //   uint16 size  = payload_size + 4  (BIG-endian on wire, server reverses)
-        //   uint32 cmd   = opcode            (LITTLE-endian on wire)
-        // Server does: EndianConvertReverse(size) -> swaps bytes on LE host
-        //              EndianConvert(cmd)        -> no-op on LE host
-        uint32 totalSize = payload.size() + 4;
+        // Client→Server header (6 bytes): uint16 size(BE) + uint32 cmd(LE)
+        uint16 payloadSize = uint16(payload.size());
         uint8 header[6];
-        header[0] = uint8(totalSize >> 8);  // BE size high
-        header[1] = uint8(totalSize);       // BE size low
-        header[2] = uint8(cmd);             // LE cmd byte 0
-        header[3] = uint8(cmd >> 8);        // LE cmd byte 1
-        header[4] = 0;                      // cmd byte 2 (unused)
-        header[5] = 0;                      // cmd byte 3 (unused)
+        header[0] = uint8((sizeof(uint32) + payloadSize) >> 8);
+        header[1] = uint8(sizeof(uint32) + payloadSize);
+        header[2] = uint8(cmd);
+        header[3] = uint8(cmd >> 8);
+        header[4] = 0;
+        header[5] = 0;
 
-        bool encrypt = !skipEncrypt && encrypted_;
-        // NOTE: AzerothCore server only encrypts the HEADER, not the payload.
-        // To keep cipher state in sync, we also only encrypt the header.
-        if (encrypt) {
+        if (encrypted_ && !skipEncrypt) {
             uint8 cryptedHeader[6];
             memcpy(cryptedHeader, header, 6);
             sendEncrypt_.UpdateData(cryptedHeader, 6);
@@ -636,28 +528,21 @@ namespace WoWClient
         }
 
         if (!payload.empty()) {
-            // Payload is sent UNENCRYPTED to match server behavior.
-            // Server only decrypts the header (see WorldSocket::ReadHeaderHandler).
             if (!WriteAll(payload.data(), payload.size())) return false;
         }
         return true;
     }
 
     bool WorldSocket::RecvPacket(uint16& cmd, std::vector<uint8>& payload) {
-        // AzerothCore ServerPktHeader wire format (server->client, after decryption):
-        //   Small:  [size_hi] [size_lo] [cmd_lo] [cmd_hi]         (4 bytes)
-        //   Large:  [0x80|size_mid] [size_hi] [size_lo] [cmd_lo] [cmd_hi] (5 bytes)
-        //
-        // CRITICAL: We must decrypt the first 2 bytes BEFORE determining header length,
-        // because RC4 encryption can set bit 7 in the first byte even when the
-        // unencrypted header doesn't have it. The server encrypts exactly
-        // getHeaderLength() bytes (4 or 5), so we must decrypt exactly the same amount.
-        uint8 hdrBuf[5];
-
-        // Step 1: Read the first 2 encrypted bytes
-        if (!ReadExact(hdrBuf, 2)) {
-            std::cerr << "[World] RecvPacket: ReadExact failed for header (2 bytes)\n";
+        // Server→Client header: 固定 4 字节
+        uint8 header[4];
+        if (!ReadExact(header, 4)) {
+            std::cerr << "[World] RecvPacket: ReadExact failed for header (4 bytes)\n";
             return false;
+        }
+
+        if (encrypted_) {
+            recvDecrypt_.UpdateData(header, 4);
         }
 
         auto hexStr = [](const uint8* d, size_t l) -> std::string {
@@ -666,62 +551,28 @@ namespace WoWClient
             return s;
         };
 
-        // Step 2: Decrypt the first 2 bytes to check bit 7 (large packet marker)
-        if (encrypted_) {
-            recvDecrypt_.UpdateData(hdrBuf, 2);
-        }
+        uint16 size = readU16BE(header);
+        cmd = uint16(header[2]) | (uint16(header[3]) << 8);
 
-        // Step 3: Now determine header length from DECRYPTED first byte
-        uint8 hdrLen = (hdrBuf[0] & 0x80) ? 5 : 4;
+        std::cerr << "[World] RecvPacket: hdr (4 bytes): " << hexStr(header, 4)
+                  << " cmd=0x" << std::hex << cmd << std::dec << " size=" << size << "\n";
 
-        // Step 4: Read and decrypt the remaining bytes
-        if (hdrLen == 5) {
-            if (!ReadExact(hdrBuf + 2, 3)) {
-                std::cerr << "[World] RecvPacket: ReadExact failed for large header\n";
-                return false;
-            }
-            if (encrypted_) {
-                recvDecrypt_.UpdateData(hdrBuf + 2, 3);
-            }
-        } else {
-            if (!ReadExact(hdrBuf + 2, 2)) {
-                std::cerr << "[World] RecvPacket: ReadExact failed for cmd\n";
-                return false;
-            }
-            if (encrypted_) {
-                recvDecrypt_.UpdateData(hdrBuf + 2, 2);
-            }
-        }
-
-        // Now the full header is decrypted
-        std::cerr << "[World] RecvPacket: decrypted hdr (" << (int)hdrLen << " bytes): "
-                  << hexStr(hdrBuf, hdrLen) << "\n";
-
-        // Step 5: Parse the decrypted header
-        uint32 rawSize;
-        if (hdrLen == 5) {
-            rawSize = (uint32(hdrBuf[0] & 0x7F) << 16) | (uint32(hdrBuf[1]) << 8) | uint32(hdrBuf[2]);
-            cmd = uint16(hdrBuf[3]) | (uint16(hdrBuf[4]) << 8);
-        } else {
-            rawSize = (uint32(hdrBuf[0]) << 8) | uint32(hdrBuf[1]);
-            cmd = uint16(hdrBuf[2]) | (uint16(hdrBuf[3]) << 8);
-        }
-
-        uint16 size = (rawSize >= 2) ? (rawSize - 2) : 0;
-
-        if (rawSize == 0) {
-            std::cerr << "[World] RecvPacket: zero header\n";
+        if (size < sizeof(uint16)) {
+            std::cerr << "[World] RecvPacket: invalid size: " << size << "\n";
             return false;
         }
 
-        payload.resize(size);
-        if (size > 0) {
-            if (!ReadExact(payload.data(), size)) {
-                std::cerr << "[World] RecvPacket: ReadExact failed for payload (len=" << size << ", rawSize=" << rawSize << ")\n";
-                return false;
-            }
+        size_t payloadLen = size - sizeof(uint16);
+        if (payloadLen == 0) {
+            payload.clear();
+            return true;
         }
-        std::cerr << "[World] RecvPacket: cmd=0x" << std::hex << cmd << " rawSize=" << std::dec << rawSize << " payloadLen=" << size << " hdrLen=" << (int)hdrLen << "\n";
+
+        payload.resize(payloadLen);
+        if (!ReadExact(payload.data(), payloadLen)) {
+            std::cerr << "[World] RecvPacket: ReadExact failed for payload (len=" << payloadLen << ", rawSize=" << size << ")\n";
+            return false;
+        }
         return true;
     }
 
@@ -740,7 +591,7 @@ namespace WoWClient
                     fd_set fds;
                     FD_ZERO(&fds);
                     FD_SET(fd_, &fds);
-                    struct timeval tv{1, 0}; // 1 second timeout
+                    struct timeval tv{1, 0};
                     int ret = select((int)fd_ + 1, &fds, nullptr, nullptr, &tv);
                     if (ret <= 0) {
                         if (ret == 0) {
@@ -750,14 +601,12 @@ namespace WoWClient
                         }
                         return false;
                     }
-                    // Data available, continue reading
                     continue;
                 }
                 std::cerr << "[World] ReadExact: recv error: " << SOCKET_ERROR_MSG() << "\n";
                 return false;
             }
             if (n == 0) {
-                // Connection closed
                 std::cerr << "[World] ReadExact: connection closed by peer (" << received << "/" << len << " bytes)\n";
                 return false;
             }
@@ -799,7 +648,6 @@ namespace WoWClient
         unsigned int hlen = 20;
         HMAC_Final(hctx, recvKey, &hlen);
         HMAC_CTX_free(hctx);
-        // recvDecrypt_ on client: corresponds to server's _serverEncrypt
         recvDecrypt_.Init(recvKey, 20);
 
         uint8 serverDecKey[16] = {
@@ -813,11 +661,8 @@ namespace WoWClient
         hlen = 20;
         HMAC_Final(hctx, sendKey, &hlen);
         HMAC_CTX_free(hctx);
-        // sendEncrypt_ on client: corresponds to server's _clientDecrypt
         sendEncrypt_.Init(sendKey, 20);
 
-        // WoW uses ARC4-drop1024: both sides must drop 1024 bytes of keystream
-        // after initialization so their cipher states are aligned.
         uint8 dropBuf[1024] = {0};
         recvDecrypt_.UpdateData(dropBuf, sizeof(dropBuf));
         sendEncrypt_.UpdateData(dropBuf, sizeof(dropBuf));

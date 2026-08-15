@@ -561,6 +561,8 @@ namespace WoWClient
         bool ReadExact(void* buf, size_t len);
         bool WriteAll(const void* buf, size_t len);
         void InitEncryption();
+        void SetEncrypted(bool v) { encrypted_ = v; }
+        bool IsEncrypted() const { return encrypted_; }
     };
 
 } // namespace WoWClient
