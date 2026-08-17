@@ -201,6 +201,7 @@ namespace WoWClient
     constexpr uint16 SMSG_TRANSFER_PENDING  = 0x003F;
     constexpr uint16 SMSG_TRANSFER_ABORTED = 0x0040;
     constexpr uint16 SMSG_TIME_SYNC_REQ     = 0x0390;
+    constexpr uint16 SMSG_MESSAGE_CHAT      = 0x0096;
 
     // =========================================================================
     // 数据结构
@@ -599,6 +600,9 @@ namespace WoWClient
         void Disconnect();
         bool IsConnected() const;
         void SetUsername(const std::string& un);
+        // Log prefix like "[account/Char]" prepended to periodic output lines
+        // so multiple simulator instances are distinguishable in a shared log.
+        void SetLogPrefix(const std::string& p);
 
         bool RecvAuthChallenge();
         bool SendAuthSession(const AuthResult& auth, const std::string& username, uint8 realmId);
@@ -635,6 +639,7 @@ namespace WoWClient
         ARC4 sendEncrypt_;
         ARC4 recvDecrypt_;
         std::string username_;
+        std::string logPrefix_;
         uint64 moverGuid_ = 0;
         Vec3 moverPos_;
         float moverO_ = 0.0f;

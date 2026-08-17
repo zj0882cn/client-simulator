@@ -386,6 +386,11 @@ int runLoginLoop(const Args& args) {
 
     std::cout << "\n[+] " << chosen->name << " entered the world!\n";
 
+    // Prefix periodic output with "[account/Char]" so multiple simulator
+    // instances are distinguishable in a shared log.
+    std::string logTag = "[" + args.account + "/" + chosen->name + "]";
+    world.SetLogPrefix(logTag);
+
     // ---- 组队邀请 ----
     if (!args.inviteTarget.empty()) {
         // invite_target 支持逗号分隔多个角色名
@@ -483,6 +488,31 @@ int runLoginLoop(const Args& args) {
             if (cmd == SMSG_TIME_SYNC_REQ && payload.size() >= 4) {
                 world.SendTimeSyncResponse(readU32LE(payload.data()));
             }
+            // 打印服务器聊天消息（.bot 命令返回等）, 便于测试验证
+            if (cmd == SMSG_MESSAGE_CHAT) {
+                std::cout << "[DBG] SMSG_MESSAGE_CHAT size=" << payload.size() << "\n" << std::flush;
+                if (payload.size() <= 30) continue;
+                size_t off = 0;
+                uint8 chatType = payload[off++];
+                off += 4;                     // language
+                off += 8;                     // sender guid
+                off += 4;                     // unk
+                off += 8;                     // target guid
+                if (off + 4 <= payload.size()) {
+                    uint32 nameLen = readU32LE(payload.data() + off);
+                    off += 4;
+                    off += std::min<size_t>(nameLen, payload.size() - off);
+                    if (off + 4 <= payload.size()) {
+                        uint32 textLen = readU32LE(payload.data() + off);
+                        off += 4;
+                        size_t avail = payload.size() - off;
+                        uint32 n = std::min(textLen, (uint32)avail);
+                        std::string text((const char*)payload.data() + off, n);
+                        if (!text.empty())
+                            std::cout << "[Chat] type=" << int(chatType) << " " << text << "\n" << std::flush;
+                    }
+                }
+            }
         }
 
         if (!world.IsConnected()) {
@@ -508,14 +538,14 @@ int runLoginLoop(const Args& args) {
                     float ny = cur.y + dy / dist * step;
                     float nz = cur.z + dz / dist * step;
                     world.SetMover(world.GetMoverGuid(), Vec3{nx, ny, nz}, 0.0f);
-                    std::cout << "[World] Moved to " << nx << "," << ny << "," << nz << "\n" << std::flush;
+                    std::cout << logTag << " Moved to " << nx << "," << ny << "," << nz << "\n" << std::flush;
                 }
             }
             if (world.SendMoveHeartbeat()) {
                 if (++heartbeatCount % 3 == 0)
-                    std::cout << "[World] Move heartbeat sent (" << heartbeatCount << ")\n" << std::flush;
+                    std::cout << logTag << " Move heartbeat sent (" << heartbeatCount << ")\n" << std::flush;
             } else {
-                std::cerr << "[-] Move heartbeat FAILED (guid=" << chosen->guid << ")\n" << std::flush;
+                std::cerr << logTag << " Move heartbeat FAILED (guid=" << chosen->guid << ")\n" << std::flush;
             }
             lastMove = now;
         }

@@ -125,6 +125,7 @@ namespace WoWClient
     bool WorldSocket::IsConnected() const { return fd_ != SOCKET_INVALID && !connClosed_; }
 
     void WorldSocket::SetUsername(const std::string& un) { username_ = un; }
+    void WorldSocket::SetLogPrefix(const std::string& p) { logPrefix_ = p; }
 
     bool WorldSocket::RecvAuthChallenge() {
         uint16 cmd;
@@ -580,7 +581,7 @@ namespace WoWClient
             std::chrono::system_clock::now().time_since_epoch()).count());
         writeU32LE(payload.data() + 4, clientTime);
         if (!SendPacket(CMSG_TIME_SYNC_RESP, payload)) return false;
-        std::cout << "[World] TimeSync response sent (counter=" << counter << ")\n";
+        std::cout << (logPrefix_.empty() ? std::string("[World]") : logPrefix_) << " TimeSync response sent (counter=" << counter << ")\n";
         return true;
     }
 
@@ -635,12 +636,16 @@ namespace WoWClient
             const char* channelName = "General";
             payload.insert(payload.end(), channelName, channelName + strlen(channelName) + 1);
         } else {
-            pushU32(0);
-            pushU32(7);
+            pushU32(0);   // CHAT_MSG_SAY
+            pushU32(0);   // LANG_COMMON (NOT LANG_UNIVERSAL=7: server rejects
+                          // universal-language SAY as a hack attempt)
         }
         payload.insert(payload.end(), msg.begin(), msg.end());
         payload.push_back(0);
         if (!SendPacket(CMSG_MESSAGECHAT, payload)) return false;
+        std::cout << "[ChatDBG] type=" << (int)readU32LE(payload.data())
+                  << " lang=" << (int)readU32LE(payload.data() + 4)
+                  << " msg='" << msg << "'\n" << std::flush;
         std::cout << "[World] Chat sent: " << msg << "\n";
         return true;
     }
