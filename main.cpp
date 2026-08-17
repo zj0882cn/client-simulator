@@ -450,6 +450,25 @@ int runLoginLoop(const Args& args) {
 
     long loopCount = 0;
 
+    // Disconnect diagnostics: track uptime and recently received opcodes so we
+    // can tell WHY a session dropped (server kick / connection lost / ping).
+    auto t0 = std::chrono::steady_clock::now();
+    std::vector<uint16> lastPkt;
+    auto dumpDrop = [&](const char* reason) {
+        auto sec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        std::cerr << logTag << " DISCONNECT reason=" << reason
+                  << " uptime_s=" << sec
+                  << " loop=" << loopCount
+                  << " heartbeat=" << heartbeatCount
+                  << " ping_seq=" << pingSeq
+                  << " ping_fail=" << pingFailCount << "\n";
+        std::cerr << logTag << " last packets:";
+        for (uint16 c : lastPkt)
+            std::cerr << " " << std::hex << c << std::dec;
+        std::cerr << "\n";
+    };
+
     // Parse optional move target ("x,y,z") for follow testing.
     Vec3 moveTarget{0,0,0};
     bool hasMoveTarget = false;
@@ -480,8 +499,11 @@ int runLoginLoop(const Args& args) {
         std::vector<uint8> payload;
         while (processed < 32 && world.RecvPacketNonBlocking(cmd, payload)) {
             ++processed;
+            lastPkt.push_back(cmd);
+            if (lastPkt.size() > 20) lastPkt.erase(lastPkt.begin());
             if (cmd == SMSG_LOGOUT_COMPLETE) {
-                std::cout << "\n[*] Logout complete, exiting...\n";
+                std::cout << logTag << "\n[*] Logout complete, exiting...\n";
+                dumpDrop("server_kick_logout");
                 return 0;
             }
             // 响应服务器时间同步请求, 避免被判定为异常连接
@@ -516,7 +538,8 @@ int runLoginLoop(const Args& args) {
         }
 
         if (!world.IsConnected()) {
-            std::cerr << "[-] Connection lost\n";
+            std::cerr << logTag << "[-] Connection lost\n";
+            dumpDrop("connection_lost");
             break;
         }
 
@@ -561,8 +584,11 @@ int runLoginLoop(const Args& args) {
                 std::cout << "[" << timeBuf << "] Ping OK (seq=" << pingSeq - 1 << ")\n";
             } else {
                 pingFailCount++;
-                std::cerr << "[-] Ping failed (" << pingFailCount << "/3)\n";
-                if (pingFailCount >= 3) break;
+                std::cerr << logTag << "[-] Ping failed (" << pingFailCount << "/3)\n";
+                if (pingFailCount >= 3) {
+                    dumpDrop("ping_timeout");
+                    break;
+                }
             }
             lastPing = now;
         }
