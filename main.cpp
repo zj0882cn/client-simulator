@@ -59,6 +59,13 @@ struct Args {
     uint16 port = AUTH_SERVER_PORT;
     std::string botTarget;
     std::string configFile = "config.ini";
+    // For action=create: name of the character to create.
+    std::string createName;
+    // Optional: invite this player to group after entering world.
+    std::string inviteTarget;
+    // Optional: simulate walking toward this target ("x,y,z") to test
+    // bot follow behaviour. Only the master should use this.
+    std::string moveTo;
     bool listOnly = false;
     bool testOnly = false;
 };
@@ -98,10 +105,14 @@ void loadConfig(const std::string& filename, Args& args) {
             else if (key == "port") args.port = uint16(std::atoi(value.c_str()));
             else if (key == "character") args.character = value;
             else if (key == "bot_target") args.botTarget = value;
+            else if (key == "invite_target") args.inviteTarget = value;
+            else if (key == "move_to") args.moveTo = value;
+            else if (key == "create_name") args.createName = value;
             else if (key == "action") {
                 args.action = value;
                 if (value == "list") { args.listOnly = true; args.action = "list"; }
                 else if (value == "test") { args.testOnly = true; args.action = "test"; }
+                else if (value == "create") { args.action = "create"; }
                 else args.action = "login";
             }
         }
@@ -139,7 +150,7 @@ Args parseArgs(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) { ++i; continue; }
 
-        if (arg == "login" || arg == "list" || arg == "test") {
+        if (arg == "login" || arg == "list" || arg == "test" || arg == "create") {
             args.action = arg;
             if (arg == "list") args.listOnly = true;
             if (arg == "test") args.testOnly = true;
@@ -149,9 +160,12 @@ Args parseArgs(int argc, char** argv) {
             if (arg == "--account" || arg == "-a") args.account = next;
             else if (arg == "--password" || arg == "-p") args.password = next;
             else if (arg == "--character" || arg == "-c") args.character = next;
+            else if (arg == "--create-name") args.createName = next;
             else if (arg == "--host" || arg == "-H") args.host = next;
             else if (arg == "--port" || arg == "-P") args.port = uint16(std::atoi(next.c_str()));
             else if (arg == "--bot-target" || arg == "-t") args.botTarget = next;
+            else if (arg == "--invite" || arg == "-i") args.inviteTarget = next;
+            else if (arg == "--move-to") args.moveTo = next;
         }
     }
 
@@ -271,6 +285,37 @@ int runLoginLoop(const Args& args) {
         return 1;
     }
 
+    // action=create: 如果账号没有角色（或想新建），发送 CMSG_CHAR_CREATE 建一个，
+    // 然后重新获取角色列表继续登录流程。
+    if (args.action == "create") {
+        std::string createName = args.createName.empty() ? args.character : args.createName;
+        if (createName.empty()) {
+            std::cerr << "[-] action=create 需要 --create-name 或 --character 指定角色名\n";
+            return 1;
+        }
+
+        bool exists = false;
+        for (const auto& ch : chars) {
+            if (ch.name == createName) { exists = true; break; }
+        }
+
+        if (exists) {
+            std::cout << "[*] Character '" << createName << "' already exists, skipping creation\n";
+        } else {
+            // 人族(Human) 战士(Warrior) 男性: race=1, class=1, gender=0
+            if (!world.CreateCharacter(createName, 1, 1, 0, 1, 0, 1, 0, 0)) {
+                std::cerr << "[-] Character creation failed\n";
+                return 1;
+            }
+            // 重新获取角色列表
+            chars.clear();
+            if (!world.RecvCharacterList(chars)) {
+                std::cerr << "[-] Failed to get character list after creation\n";
+                return 1;
+            }
+        }
+    }
+
     if (chars.empty()) {
         std::cerr << "[-] No characters on this account\n";
         return 1;
@@ -336,6 +381,20 @@ int runLoginLoop(const Args& args) {
 
     std::cout << "\n[+] " << chosen->name << " entered the world!\n";
 
+    // ---- 组队邀请 ----
+    if (!args.inviteTarget.empty()) {
+        // invite_target 支持逗号分隔多个角色名
+        std::stringstream ss(args.inviteTarget);
+        std::string target;
+        while (std::getline(ss, target, ',')) {
+            target = trimString(target);
+            if (target.empty()) continue;
+            std::cout << "[*] Inviting group member: " << target << "\n";
+            world.SendGroupInvite(target);
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        }
+    }
+
     // ---- Bot 模式 ----
     if (!args.botTarget.empty()) {
         std::cout << "[*] Setting bot mode target: " << args.botTarget << "\n";
@@ -367,6 +426,27 @@ int runLoginLoop(const Args& args) {
     int heartbeatCount = 0;
 
     long loopCount = 0;
+
+    // Parse optional move target ("x,y,z") for follow testing.
+    Vec3 moveTarget{0,0,0};
+    bool hasMoveTarget = false;
+    if (!args.moveTo.empty()) {
+        std::stringstream ss(args.moveTo);
+        std::string tok;
+        int idx = 0;
+        while (std::getline(ss, tok, ',')) {
+            float v = (float)std::atof(tok.c_str());
+            if (idx == 0) moveTarget.x = v;
+            else if (idx == 1) moveTarget.y = v;
+            else if (idx == 2) moveTarget.z = v;
+            ++idx;
+        }
+        hasMoveTarget = idx >= 2;
+        if (hasMoveTarget)
+            std::cout << "[*] Simulating walk toward " << moveTarget.x
+                      << "," << moveTarget.y << "," << moveTarget.z << "\n";
+    }
+
     while (g_running && world.IsConnected()) {
         ++loopCount;
 
@@ -397,6 +477,22 @@ int runLoginLoop(const Args& args) {
         // 定期发送移动心跳包, 模拟正常客户端行为(即使角色静止也持续上报移动状态)
         auto moveElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMove);
         if (moveElapsed.count() >= 2000) {
+            // If walking to a target, advance the position a bit each tick.
+            if (hasMoveTarget) {
+                Vec3 cur = world.GetMoverPos();
+                float dx = moveTarget.x - cur.x;
+                float dy = moveTarget.y - cur.y;
+                float dz = moveTarget.z - cur.z;
+                float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (dist > 1.0f) {
+                    float step = 8.0f; // move ~8 yards per tick
+                    float nx = cur.x + dx / dist * step;
+                    float ny = cur.y + dy / dist * step;
+                    float nz = cur.z + dz / dist * step;
+                    world.SetMover(world.GetMoverGuid(), Vec3{nx, ny, nz}, 0.0f);
+                    std::cout << "[World] Moved to " << nx << "," << ny << "," << nz << "\n" << std::flush;
+                }
+            }
             if (world.SendMoveHeartbeat()) {
                 if (++heartbeatCount % 3 == 0)
                     std::cout << "[World] Move heartbeat sent (" << heartbeatCount << ")\n" << std::flush;

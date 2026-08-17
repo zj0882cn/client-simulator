@@ -175,10 +175,12 @@ namespace WoWClient
     // World client opcodes (CMSG_*)
     constexpr uint32 CMSG_AUTH_SESSION       = 0x01ED;
     constexpr uint32 CMSG_CHAR_ENUM          = 0x0037;
+    constexpr uint32 CMSG_CHAR_CREATE        = 0x0036;
     constexpr uint32 CMSG_PLAYER_LOGIN       = 0x003D;
     constexpr uint32 CMSG_PING               = 0x01DC;
     constexpr uint32 CMSG_SET_ACTIVE_MOVER   = 0x026A;
     constexpr uint32 CMSG_MESSAGECHAT        = 0x0095;
+    constexpr uint32 CMSG_GROUP_INVITE      = 0x006E;
     constexpr uint32 CMSG_LOGOUT             = 0x004B;
     constexpr uint32 CMSG_TIME_SYNC_RESP     = 0x0391;
     constexpr uint32 CMSG_MOVE_HEARTBEAT     = 0x00EE;
@@ -191,6 +193,7 @@ namespace WoWClient
     constexpr uint16 SMSG_CLIENTCACHE_VERSION = 0x04AB;
     constexpr uint16 SMSG_TUTORIAL_FLAGS    = 0x00FD;
     constexpr uint16 SMSG_CHAR_ENUM         = 0x003B;
+    constexpr uint16 SMSG_CHAR_CREATE       = 0x003A;
     constexpr uint16 SMSG_LOGIN_VERIFY_WORLD = 0x0236;
     constexpr uint16 SMSG_PONG              = 0x01DD;
     constexpr uint16 SMSG_LOGOUT_COMPLETE   = 0x004D;
@@ -601,6 +604,10 @@ namespace WoWClient
         bool SendAuthSession(const AuthResult& auth, const std::string& username, uint8 realmId);
         bool WaitAuthResponse(uint8& result, uint32& billingFlags);
         bool RecvCharacterList(std::vector<CharacterInfo>& chars);
+        // Create a character (CMSG_CHAR_CREATE). Returns true on success.
+        bool CreateCharacter(const std::string& name, uint8 race, uint8 clazz,
+                             uint8 gender, uint8 skin, uint8 face,
+                             uint8 hairStyle, uint8 hairColor, uint8 facialHair);
         bool LoginCharacter(uint64 guid);
         bool WaitWorldEnter();
         bool SendActiveMover(uint64 guid);
@@ -608,7 +615,11 @@ namespace WoWClient
         bool SendTimeSyncResponse(uint32 counter);
         bool SendMoveHeartbeat();
         void SetMover(uint64 guid, const Vec3& pos, float orientation);
+        uint64 GetMoverGuid() const { return moverGuid_; }
+        Vec3 GetMoverPos() const { return moverPos_; }
         bool SendChatMessage(const std::string& msg, uint8 channel = 0);
+        // Invite a player to the group (CMSG_GROUP_INVITE).
+        bool SendGroupInvite(const std::string& name);
         bool HasPendingData(uint32 timeoutMs);
         bool RecvPacketNonBlocking(uint16& cmd, std::vector<uint8>& payload);
 
