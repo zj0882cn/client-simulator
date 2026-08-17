@@ -66,6 +66,9 @@ struct Args {
     // Optional: simulate walking toward this target ("x,y,z") to test
     // bot follow behaviour. Only the master should use this.
     std::string moveTo;
+    // Optional: send one or more chat commands (comma-separated) after
+    // entering the world, e.g. ".bot stay, .bot follow".
+    std::string chatCommand;
     bool listOnly = false;
     bool testOnly = false;
 };
@@ -107,6 +110,7 @@ void loadConfig(const std::string& filename, Args& args) {
             else if (key == "bot_target") args.botTarget = value;
             else if (key == "invite_target") args.inviteTarget = value;
             else if (key == "move_to") args.moveTo = value;
+            else if (key == "chat_command") args.chatCommand = value;
             else if (key == "create_name") args.createName = value;
             else if (key == "action") {
                 args.action = value;
@@ -166,6 +170,7 @@ Args parseArgs(int argc, char** argv) {
             else if (arg == "--bot-target" || arg == "-t") args.botTarget = next;
             else if (arg == "--invite" || arg == "-i") args.inviteTarget = next;
             else if (arg == "--move-to") args.moveTo = next;
+            else if (arg == "--chat") args.chatCommand = next;
         }
     }
 
@@ -406,6 +411,19 @@ int runLoginLoop(const Args& args) {
     } else {
         world.SendChatMessage("/bot list");
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+
+    // ---- 通用聊天命令（宠物式命令等）----
+    if (!args.chatCommand.empty()) {
+        std::stringstream ss(args.chatCommand);
+        std::string oneCmd;
+        while (std::getline(ss, oneCmd, ',')) {
+            oneCmd = trimString(oneCmd);
+            if (oneCmd.empty()) continue;
+            std::cout << "[*] Chat command: " << oneCmd << "\n";
+            world.SendChatMessage(oneCmd);
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        }
     }
 
     // ---- Step 5: 保活循环 ----
