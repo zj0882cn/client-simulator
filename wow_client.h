@@ -202,6 +202,8 @@ namespace WoWClient
     constexpr uint16 SMSG_TRANSFER_ABORTED = 0x0040;
     constexpr uint16 SMSG_TIME_SYNC_REQ     = 0x0390;
     constexpr uint16 SMSG_MESSAGE_CHAT      = 0x0096;
+    constexpr uint16 SMSG_GM_MESSAGECHAT    = 0x3B3;
+    constexpr uint16 SMSG_NOTIFICATION       = 0x1CB;
 
     // =========================================================================
     // 数据结构
@@ -622,6 +624,8 @@ namespace WoWClient
         uint64 GetMoverGuid() const { return moverGuid_; }
         Vec3 GetMoverPos() const { return moverPos_; }
         bool SendChatMessage(const std::string& msg, uint8 channel = 0);
+        // whisper 私聊 (验证聊天通道: whisper 给自己会被服务器回显)
+        bool SendWhisper(const std::string& target, const std::string& msg);
         // Invite a player to the group (CMSG_GROUP_INVITE).
         bool SendGroupInvite(const std::string& name);
         bool HasPendingData(uint32 timeoutMs);

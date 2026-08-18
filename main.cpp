@@ -547,29 +547,102 @@ retry_login:
             // 打印服务器聊天消息（.bot 命令返回等）, 便于测试验证
             if (cmd == SMSG_MESSAGE_CHAT) {
                 std::cout << "[DBG] SMSG_MESSAGE_CHAT size=" << payload.size() << "\n" << std::flush;
-                if (payload.size() <= 30) continue;
+                if (payload.size() <= 12) continue;
                 size_t off = 0;
                 uint8 chatType = payload[off++];
+                off += 4;                     // language (int32)
+                // sender guid: packed(可变), 非固定8字节
+                int consumed = 0;
+                if (off >= payload.size()) continue;
+                readPackedGuid(payload.data() + off, consumed);
+                off += consumed;
+                if (off + 4 > payload.size()) continue;
+                off += 4;                     // flags
+                // receiver guid: packed
+                if (off >= payload.size()) continue;
+                readPackedGuid(payload.data() + off, consumed);
+                off += consumed;
+                // message: len(4) + text
+                if (off + 4 > payload.size()) continue;
+                uint32 textLen = readU32LE(payload.data() + off);
+                off += 4;
+                size_t avail = payload.size() - off;
+                uint32 n = std::min(textLen, (uint32)avail);
+                std::string text((const char*)payload.data() + off, n);
+                if (!text.empty())
+                    std::cout << "[Chat] type=" << int(chatType) << " " << text << "\n" << std::flush;
+            }
+            // GM 命令返回(SMSG_GM_MESSAGECHAT 0x3B3): 同 MESSAGE_CHAT 但 senderGUID 为 packed
+            if (cmd == SMSG_GM_MESSAGECHAT) {
+                if (payload.size() <= 12) continue;
+                size_t off = 0;
+                uint8 gtype = payload[off++];
                 off += 4;                     // language
-                off += 8;                     // sender guid
-                off += 4;                     // unk
-                off += 8;                     // target guid
-                if (off + 4 <= payload.size()) {
-                    uint32 nameLen = readU32LE(payload.data() + off);
-                    off += 4;
-                    off += std::min<size_t>(nameLen, payload.size() - off);
-                    if (off + 4 <= payload.size()) {
-                        uint32 textLen = readU32LE(payload.data() + off);
-                        off += 4;
-                        size_t avail = payload.size() - off;
-                        uint32 n = std::min(textLen, (uint32)avail);
-                        std::string text((const char*)payload.data() + off, n);
-                        if (!text.empty())
-                            std::cout << "[Chat] type=" << int(chatType) << " " << text << "\n" << std::flush;
+                int consumed = 0;
+                if (off >= payload.size()) continue;
+                readPackedGuid(payload.data() + off, consumed);
+                off += consumed;
+                if (off + 4 > payload.size()) continue;
+                off += 4;                     // flags
+                if (off >= payload.size()) continue;
+                readPackedGuid(payload.data() + off, consumed);
+                off += consumed;
+                if (off + 4 > payload.size()) continue;
+                uint32 textLen = readU32LE(payload.data() + off);
+                off += 4;
+                size_t avail = payload.size() - off;
+                uint32 n = std::min(textLen, (uint32)avail);
+                std::string text((const char*)payload.data() + off, n);
+                if (!text.empty())
+                    std::cout << "[GM] type=" << int(gtype) << " " << text << "\n" << std::flush;
+            }
+            // 服务器通知(SMSG_NOTIFICATION 0x1CB): len(4)+text, 用于定位命令被拦截原因
+            if (cmd == SMSG_NOTIFICATION) {
+                if (payload.size() >= 4) {
+                    uint32 nlen = readU32LE(payload.data());
+                    uint32 n = std::min(nlen, (uint32)(payload.size() - 4));
+                    std::string text((const char*)payload.data() + 4, n);
+                    if (!text.empty())
+                        std::cout << "[Notify] " << text << "\n" << std::flush;
+                }
+            }
+        }
+
+        // ---- 管理员信息通道: 运行时 stdin 命令输入 ----
+        // 输入一行即作为聊天命令发给服务器(如 .bot list / .pinfo), 响应在 [Chat] 打印。
+        // 供在线 GM 用户实时查询 bot 状态/位置(黑盒, 不访问数据库)。
+#ifndef _WIN32
+        static std::string stdinBuf;
+        char rbuf[256];
+        ssize_t nread;
+        struct pollfd pfdIn{0, POLLIN, 0};
+        while (poll(&pfdIn, 1, 0) > 0 && (nread = read(0, rbuf, sizeof(rbuf))) > 0) {
+            stdinBuf.append(rbuf, nread);
+            size_t pos;
+            while ((pos = stdinBuf.find('\n')) != std::string::npos) {
+                std::string cmd = stdinBuf.substr(0, pos);
+                stdinBuf.erase(0, pos + 1);
+                cmd.erase(cmd.find_last_not_of(" \t\r\n") + 1); // trim
+                if (!cmd.empty()) {
+                    // whisper: "w <target> <msg>" 或 "w <msg>"(发给自己), 验证聊天通道
+                    if (cmd[0] == 'w' && (cmd.size() == 1 || cmd[1] == ' ')) {
+                        std::string rest = cmd.size() > 2 ? cmd.substr(2) : "";
+                        std::string target, wmsg;
+                        size_t sp = rest.find(' ');
+                        if (sp == std::string::npos) { target = chosen->name; wmsg = rest; }
+                        else { target = rest.substr(0, sp); wmsg = rest.substr(sp + 1); }
+                        if (!wmsg.empty()) {
+                            world.SendWhisper(target, wmsg);
+                            std::cout << logTag << " [Whisper->" << target << "] " << wmsg << "\n" << std::flush;
+                        }
+                    } else {
+                        world.SendChatMessage(cmd);
+                        std::cout << logTag << " [Cmd] " << cmd << "\n" << std::flush;
                     }
                 }
             }
         }
+#endif
 
         if (!world.IsConnected()) {
             std::cerr << logTag << "[-] Connection lost\n";

@@ -624,14 +624,15 @@ namespace WoWClient
         auto pushU32 = [&](uint32 v) { uint8 b[4]; writeU32LE(b, v); payload.insert(payload.end(), b, b+4); };
 
         if (channel == 1) {
-            pushU32(14);
-            pushU32(0);
+            pushU32(14);   // CHAT_MSG_CHANNEL
+            pushU32(7);    // LANG_COMMON (频道消息用通用语, 避免 LANG_UNIVERSAL=0 被服务器拒)
             const char* channelName = "General";
             payload.insert(payload.end(), channelName, channelName + strlen(channelName) + 1);
         } else {
             pushU32(0);   // CHAT_MSG_SAY
-            pushU32(0);   // LANG_COMMON (NOT LANG_UNIVERSAL=7: server rejects
-                          // universal-language SAY as a hack attempt)
+            // WoW 语言枚举: LANG_UNIVERSAL=0, LANG_COMMON=7
+            // 发 0(universal) 会被服务器判为 hack-attempt 拒绝, 必须用 7(LANG_COMMON)
+            pushU32(7);
         }
         payload.insert(payload.end(), msg.begin(), msg.end());
         payload.push_back(0);
@@ -639,7 +640,27 @@ namespace WoWClient
         std::cout << "[ChatDBG] type=" << (int)readU32LE(payload.data())
                   << " lang=" << (int)readU32LE(payload.data() + 4)
                   << " msg='" << msg << "'\n" << std::flush;
+        std::cout << "[ChatHex] ";
+        for (uint8 b : payload) std::cout << std::hex << int(b) << " ";
+        std::cout << std::dec << "\n" << std::flush;
         std::cout << "[World] Chat sent: " << msg << "\n";
+        return true;
+    }
+
+    bool WorldSocket::SendWhisper(const std::string& target, const std::string& msg) {
+        // CMSG_MESSAGECHAT type=WHISPER(3):
+        // type(4)+lang(4)+targetName(uint8 len+text)+msg(cstring)
+        std::vector<uint8> payload;
+        auto pushU32 = [&](uint32 v) { uint8 b[4]; writeU32LE(b, v); payload.insert(payload.end(), b, b+4); };
+        pushU32(3);   // CHAT_MSG_WHISPER
+        pushU32(7);   // LANG_COMMON
+        // target name: uint8 长度前缀 (服务器 recvData >> string 用 uint8)
+        payload.push_back(uint8(target.size()));
+        payload.insert(payload.end(), target.begin(), target.end());
+        payload.insert(payload.end(), msg.begin(), msg.end());
+        payload.push_back(0);
+        if (!SendPacket(CMSG_MESSAGECHAT, payload)) return false;
+        std::cout << "[World] Whisper sent: " << target << " <- " << msg << "\n" << std::flush;
         return true;
     }
 
