@@ -557,18 +557,11 @@ namespace WoWClient
         writeU32LE(payload.data() + 4, 0);  // latency
         if (!SendPacket(CMSG_PING, payload)) return false;
 
-        // 用非阻塞收包模式等待 PONG, 避免阻塞主循环
-        uint16 cmd;
-        std::vector<uint8> body;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (RecvPacketNonBlocking(cmd, body)) {
-                if (cmd == SMSG_PONG) return true;
-            }
-            if (connClosed_) return false;
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        return false;
+        // 注意: 这里【只发送, 不等待 PONG】。
+        // 之前在此循环等 PONG 会同步消费主循环的收包, 位置更新风暴(SMSG_UPDATE_OBJECT)
+        // 会挤占/淹没 PONG, 甚至吞掉 SMSG_TIME_SYNC_REQ, 导致 ping 超时误判掉线 (P-013)。
+        // PONG 现在由主循环收包处检测 (main.cpp: cmd == SMSG_PONG)。
+        return true;
     }
 
     // 响应服务器的 SMSG_TIME_SYNC_REQ: 发送 CMSG_TIME_SYNC_RESP

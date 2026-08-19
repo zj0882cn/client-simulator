@@ -61,6 +61,8 @@ struct Args {
     std::string configFile = "config.ini";
     // For action=create: name of the character to create.
     std::string createName;
+    uint8 createClass = 1;    // 默认战士
+    uint8 createGender = 0;   // 默认男
     // Optional: invite this player to group after entering world.
     std::string inviteTarget;
     // Optional: simulate walking toward this target ("x,y,z") to test
@@ -165,6 +167,8 @@ Args parseArgs(int argc, char** argv) {
             else if (arg == "--password" || arg == "-p") args.password = next;
             else if (arg == "--character" || arg == "-c") args.character = next;
             else if (arg == "--create-name") args.createName = next;
+            else if (arg == "--create-class") args.createClass = uint8(std::atoi(next.c_str()));
+            else if (arg == "--create-gender") args.createGender = uint8(std::atoi(next.c_str()));
             else if (arg == "--host" || arg == "-H") args.host = next;
             else if (arg == "--port" || arg == "-P") args.port = uint16(std::atoi(next.c_str()));
             else if (arg == "--bot-target" || arg == "-t") args.botTarget = next;
@@ -308,7 +312,7 @@ int runLoginLoop(const Args& args) {
             std::cout << "[*] Character '" << createName << "' already exists, skipping creation\n";
         } else {
             // 人族(Human) 战士(Warrior) 男性: race=1, class=1, gender=0
-            if (!world.CreateCharacter(createName, 1, 1, 0, 1, 0, 1, 0, 0)) {
+            if (!world.CreateCharacter(createName, 1, args.createClass, args.createGender, 1, 0, 1, 0, 0)) {
                 std::cerr << "[-] Character creation failed\n";
                 return 1;
             }
@@ -444,6 +448,8 @@ int runLoginLoop(const Args& args) {
 
     uint32 pingSeq = 0;
     int pingFailCount = 0;
+    bool pingAwait = false;   // 已发送 CMSG_PING, 等待服务器 SMSG_PONG
+    bool pongOk = false;      // 主循环收包处收到 SMSG_PONG
     auto lastPing = std::chrono::steady_clock::now();
     auto lastMove = std::chrono::steady_clock::now();
     int heartbeatCount = 0;
@@ -510,6 +516,13 @@ int runLoginLoop(const Args& args) {
             if (cmd == SMSG_TIME_SYNC_REQ && payload.size() >= 4) {
                 world.SendTimeSyncResponse(readU32LE(payload.data()));
             }
+            // 服务器回应客户端 ping (SMSG_PONG): 由状态机判定 ping 成功。
+            // PONG 必须在主循环正常收包处检测, 不能在 SendPing 里同步等待
+            // (等待循环会吞掉位置更新/TimeSync 包, 位置更新风暴挤掉 PONG 导致误判掉线)。
+            if (cmd == SMSG_PONG) {
+                pongOk = true;
+                pingAwait = false;
+            }
             // 打印服务器聊天消息（.bot 命令返回等）, 便于测试验证
             if (cmd == SMSG_MESSAGE_CHAT) {
                 std::cout << "[DBG] SMSG_MESSAGE_CHAT size=" << payload.size() << "\n" << std::flush;
@@ -573,23 +586,43 @@ int runLoginLoop(const Args& args) {
             lastMove = now;
         }
 
+        // 异步 Ping 状态机: 每 30 秒发 CMSG_PING, 主循环收包检测 SMSG_PONG。
+        // 发送后 10 秒未收到 PONG 判失败; 连续 3 次失败主动断线(ping_timeout)。
+        // 旧实现 SendPing 内同步等 PONG 会吞掉位置更新包 (P-013 掉线根因), 已废弃。
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPing);
-        if (elapsed.count() >= 30000) {
-            if (world.SendPing(pingSeq++)) {
-                pingFailCount = 0;
-                auto nowStr = std::chrono::system_clock::now();
-                auto timeT = std::chrono::system_clock::to_time_t(nowStr);
-                char timeBuf[64];
-                strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", localtime(&timeT));
-                std::cout << "[" << timeBuf << "] Ping OK (seq=" << pingSeq - 1 << ")\n";
-            } else {
-                pingFailCount++;
-                std::cerr << logTag << "[-] Ping failed (" << pingFailCount << "/3)\n";
-                if (pingFailCount >= 3) {
-                    dumpDrop("ping_timeout");
-                    break;
+        if (!pingAwait) {
+            if (elapsed.count() >= 30000) {
+                if (world.SendPing(pingSeq++)) {
+                    pingAwait = true;
+                    pongOk = false;
+                    lastPing = now;   // 记录发送时刻, 用于超时判定
+                } else {
+                    pingFailCount++;
+                    std::cerr << logTag << "[-] Ping send failed (" << pingFailCount << "/3)\n";
+                    if (pingFailCount >= 3) {
+                        dumpDrop("ping_timeout");
+                        break;
+                    }
+                    lastPing = now;
                 }
             }
+        } else if (pongOk) {
+            pingFailCount = 0;
+            pingAwait = false;
+            auto nowStr = std::chrono::system_clock::now();
+            auto timeT = std::chrono::system_clock::to_time_t(nowStr);
+            char timeBuf[64];
+            strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", localtime(&timeT));
+            std::cout << "[" << timeBuf << "] Ping OK (seq=" << pingSeq - 1 << ")\n";
+        } else if (elapsed.count() >= 30000 + 10000) {
+            // 发送后 10 秒仍未收到 PONG → 本次 ping 超时
+            pingFailCount++;
+            std::cerr << logTag << "[-] Ping timeout (seq=" << pingSeq - 1 << ", " << pingFailCount << "/3)\n";
+            if (pingFailCount >= 3) {
+                dumpDrop("ping_timeout");
+                break;
+            }
+            pingAwait = false;   // 允许重新发送
             lastPing = now;
         }
 
