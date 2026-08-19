@@ -13,3 +13,8 @@ CMakeFiles/
 Makefile
 cmake_install.cmake
 compile_commands.json
+
+# 本地运行配置与会话缓存（含账号密码/会话密钥，不提交）
+config.ini
+config_*.ini
+session_cache/

@@ -10,8 +10,9 @@
 - ✅ **World 认证**：实现 CMSG_AUTH_SESSION、加密握手（ARC4-drop1024）
 - ✅ **角色管理**：获取角色列表、选择角色、进入世界
 - ✅ **保活机制**：自动响应 TimeSync、发送移动心跳、定时 Ping，可长时间稳定在线
-- ✅ **Bot 模式**：支持发送 `/bot` 聊天命令与服务器 Bot 系统交互
-- ✅ **多模式运行**：登录（login）、角色列表（list）、认证测试（test）
+- ✅ **自动重连**：连接断开（TCP 真断 connection_lost）后自动重建连接（重新认证→进世界），阶梯退避 5/15/30/60s；Ping 超时仅记日志不主动断线（fire-and-forget）
+- ✅ **聊天通道修复**：SAY 使用 LANG_COMMON，服务器正常接收，不再被判定 hack-attempt（P-009）
+- ✅ **运行模式**：登录（login）、角色列表（list）
 
 ## 环境依赖
 
@@ -71,9 +72,8 @@ port = 3724          ; Auth 服务器端口
 
 ; 角色设置（可选）
 character =          ; 指定角色名，留空则自动选择第一个角色
-bot_target =         ; Bot 模式目标玩家名（可选）
 
-; 操作模式: login / list / test
+; 操作模式: login / list
 action = login
 ```
 
@@ -95,22 +95,18 @@ cd build
 
 # 4. 仅获取角色列表
 ./wow_client list --account MYACC --password mypass
-
-# 5. 仅测试 Auth 认证连接
-./wow_client test --account MYACC --password mypass
 ```
 
 ### 命令行参数
 
 | 参数 | 说明 |
 |------|------|
-| `login` / `list` / `test` | 操作模式 |
+| `login` / `list` | 操作模式 |
 | `--account` / `-a` | 账号用户名 |
 | `--password` / `-p` | 密码 |
 | `--character` / `-c` | 角色名（可选） |
 | `--host` / `-H` | Auth 服务器地址（默认 `127.0.0.1`） |
 | `--port` / `-P` | Auth 服务器端口（默认 `3724`） |
-| `--bot-target` / `-t` | Bot 模式目标玩家名（可选） |
 | `--config` | 配置文件路径（默认 `config.ini`） |
 
 ## 正常运行日志示例
