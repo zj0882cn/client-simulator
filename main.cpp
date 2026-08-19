@@ -23,7 +23,6 @@ Usage:
     wow_client.exe --config <file>      (指定配置文件)
     wow_client.exe login --account <account> --password <password> [--character <name>] [--host <ip>]
     wow_client.exe list  --account <account> --password <password> [--host <ip>]
-    wow_client.exe test  --account <account> --password <password> [--host <ip>]
 
 Options:
     --account       账号用户名
@@ -31,7 +30,6 @@ Options:
     --character     角色名（可选，不指定则选第一个角色）
     --host          Auth 服务器地址 (默认: 127.0.0.1)
     --port          Auth 服务器端口 (默认: 3724)
-    --bot-target    Bot 模式目标玩家名 (可选)
     --config        指定配置文件路径 (默认: config.ini)
 
 Config File Format (config.ini):
@@ -41,7 +39,6 @@ Config File Format (config.ini):
     host = 127.0.0.1
     port = 3724
     character = MyHero
-    bot_target = BotTarget
 
 Examples:
     wow_client.exe                          (从 config.ini 读取)
@@ -57,22 +54,8 @@ struct Args {
     std::string character;
     std::string host = "127.0.0.1";
     uint16 port = AUTH_SERVER_PORT;
-    std::string botTarget;
     std::string configFile = "config.ini";
-    // For action=create: name of the character to create.
-    std::string createName;
-    uint8 createClass = 1;    // 默认战士
-    uint8 createGender = 0;   // 默认男
-    // Optional: invite this player to group after entering world.
-    std::string inviteTarget;
-    // Optional: simulate walking toward this target ("x,y,z") to test
-    // bot follow behaviour. Only the master should use this.
-    std::string moveTo;
-    // Optional: send one or more chat commands (comma-separated) after
-    // entering the world, e.g. ".bot stay, .bot follow".
-    std::string chatCommand;
     bool listOnly = false;
-    bool testOnly = false;
 };
 
 std::string trimString(const std::string& s) {
@@ -109,16 +92,9 @@ void loadConfig(const std::string& filename, Args& args) {
             else if (key == "host") args.host = value;
             else if (key == "port") args.port = uint16(std::atoi(value.c_str()));
             else if (key == "character") args.character = value;
-            else if (key == "bot_target") args.botTarget = value;
-            else if (key == "invite_target") args.inviteTarget = value;
-            else if (key == "move_to") args.moveTo = value;
-            else if (key == "chat_command") args.chatCommand = value;
-            else if (key == "create_name") args.createName = value;
             else if (key == "action") {
                 args.action = value;
                 if (value == "list") { args.listOnly = true; args.action = "list"; }
-                else if (value == "test") { args.testOnly = true; args.action = "test"; }
-                else if (value == "create") { args.action = "create"; }
                 else args.action = "login";
             }
         }
@@ -156,25 +132,17 @@ Args parseArgs(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) { ++i; continue; }
 
-        if (arg == "login" || arg == "list" || arg == "test" || arg == "create") {
+        if (arg == "login" || arg == "list") {
             args.action = arg;
             if (arg == "list") args.listOnly = true;
-            if (arg == "test") args.testOnly = true;
         }
         else if (i + 1 < argc) {
             std::string next = argv[++i];
             if (arg == "--account" || arg == "-a") args.account = next;
             else if (arg == "--password" || arg == "-p") args.password = next;
             else if (arg == "--character" || arg == "-c") args.character = next;
-            else if (arg == "--create-name") args.createName = next;
-            else if (arg == "--create-class") args.createClass = uint8(std::atoi(next.c_str()));
-            else if (arg == "--create-gender") args.createGender = uint8(std::atoi(next.c_str()));
             else if (arg == "--host" || arg == "-H") args.host = next;
             else if (arg == "--port" || arg == "-P") args.port = uint16(std::atoi(next.c_str()));
-            else if (arg == "--bot-target" || arg == "-t") args.botTarget = next;
-            else if (arg == "--invite" || arg == "-i") args.inviteTarget = next;
-            else if (arg == "--move-to") args.moveTo = next;
-            else if (arg == "--chat") args.chatCommand = next;
         }
     }
 
@@ -210,8 +178,6 @@ retry_login:
     std::cout << "Host:    " << args.host << ":" << args.port << "\n";
     if (!args.character.empty())
         std::cout << "Char:    " << args.character << "\n";
-    if (!args.botTarget.empty())
-        std::cout << "Target:  " << args.botTarget << "\n";
     std::cout << "\n";
 
     // ---- Step 1: Auth 认证 ----
@@ -239,13 +205,6 @@ retry_login:
     std::cout << "[*] Realms available: " << realms.size() << "\n";
     for (auto& r : realms) {
         std::cout << "    - " << r.name << " (" << r.address << ":" << r.port << ")\n";
-    }
-
-    // Test mode: stop here
-    if (args.testOnly) {
-        auth.Disconnect();
-        std::cout << "\n[+] Test PASSED - Auth connection and login successful!\n";
-        return 0;
     }
 
     RealmInfo realm = realms[0];
@@ -313,37 +272,6 @@ retry_login:
     if (!world.RecvCharacterList(chars)) {
         std::cerr << "[-] Failed to get character list\n";
         goto retry_login;   // 连接类失败 → 重建 TCP 重连
-    }
-
-    // action=create: 如果账号没有角色（或想新建），发送 CMSG_CHAR_CREATE 建一个，
-    // 然后重新获取角色列表继续登录流程。
-    if (args.action == "create") {
-        std::string createName = args.createName.empty() ? args.character : args.createName;
-        if (createName.empty()) {
-            std::cerr << "[-] action=create 需要 --create-name 或 --character 指定角色名\n";
-            return 1;
-        }
-
-        bool exists = false;
-        for (const auto& ch : chars) {
-            if (ch.name == createName) { exists = true; break; }
-        }
-
-        if (exists) {
-            std::cout << "[*] Character '" << createName << "' already exists, skipping creation\n";
-        } else {
-            // 人族(Human) 战士(Warrior) 男性: race=1, class=1, gender=0
-            if (!world.CreateCharacter(createName, 1, args.createClass, args.createGender, 1, 0, 1, 0, 0)) {
-                std::cerr << "[-] Character creation failed\n";
-                return 1;
-            }
-            // 重新获取角色列表
-            chars.clear();
-            if (!world.RecvCharacterList(chars)) {
-                std::cerr << "[-] Failed to get character list after creation\n";
-                return 1;
-            }
-        }
     }
 
     if (chars.empty()) {
@@ -416,45 +344,7 @@ retry_login:
     std::string logTag = "[" + args.account + "/" + chosen->name + "]";
     world.SetLogPrefix(logTag);
 
-    // ---- 组队邀请 ----
-    if (!args.inviteTarget.empty()) {
-        // invite_target 支持逗号分隔多个角色名
-        std::stringstream ss(args.inviteTarget);
-        std::string target;
-        while (std::getline(ss, target, ',')) {
-            target = trimString(target);
-            if (target.empty()) continue;
-            std::cout << "[*] Inviting group member: " << target << "\n";
-            world.SendGroupInvite(target);
-            std::this_thread::sleep_for(std::chrono::milliseconds(800));
-        }
-    }
-
-    // ---- Bot 模式 ----
-    if (!args.botTarget.empty()) {
-        std::cout << "[*] Setting bot mode target: " << args.botTarget << "\n";
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        world.SendChatMessage("/bot set " + args.botTarget);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        world.SendChatMessage("/bot list");
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    } else {
-        world.SendChatMessage("/bot list");
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    }
-
-    // ---- 通用聊天命令（宠物式命令等）----
-    if (!args.chatCommand.empty()) {
-        std::stringstream ss(args.chatCommand);
-        std::string oneCmd;
-        while (std::getline(ss, oneCmd, ',')) {
-            oneCmd = trimString(oneCmd);
-            if (oneCmd.empty()) continue;
-            std::cout << "[*] Chat command: " << oneCmd << "\n";
-            world.SendChatMessage(oneCmd);
-            std::this_thread::sleep_for(std::chrono::milliseconds(600));
-        }
-    }
+    // ---- 组队邀请 / Bot 模式 / 通用聊天命令（测试辅助）已移除 ----
 
     // ---- Step 5: 保活循环 ----
     std::cout << "\n[*] Starting keep-alive loop (Ctrl+C to stop)...\n\n";
@@ -495,26 +385,6 @@ retry_login:
             std::cerr << " " << std::hex << c << std::dec;
         std::cerr << "\n";
     };
-
-    // Parse optional move target ("x,y,z") for follow testing.
-    Vec3 moveTarget{0,0,0};
-    bool hasMoveTarget = false;
-    if (!args.moveTo.empty()) {
-        std::stringstream ss(args.moveTo);
-        std::string tok;
-        int idx = 0;
-        while (std::getline(ss, tok, ',')) {
-            float v = (float)std::atof(tok.c_str());
-            if (idx == 0) moveTarget.x = v;
-            else if (idx == 1) moveTarget.y = v;
-            else if (idx == 2) moveTarget.z = v;
-            ++idx;
-        }
-        hasMoveTarget = idx >= 2;
-        if (hasMoveTarget)
-            std::cout << "[*] Simulating walk toward " << moveTarget.x
-                      << "," << moveTarget.y << "," << moveTarget.z << "\n";
-    }
 
     while (g_running && world.IsConnected()) {
         ++loopCount;
@@ -608,42 +478,6 @@ retry_login:
             }
         }
 
-        // ---- 管理员信息通道: 运行时 stdin 命令输入 ----
-        // 输入一行即作为聊天命令发给服务器(如 .bot list / .pinfo), 响应在 [Chat] 打印。
-        // 供在线 GM 用户实时查询 bot 状态/位置(黑盒, 不访问数据库)。
-#ifndef _WIN32
-        static std::string stdinBuf;
-        char rbuf[256];
-        ssize_t nread;
-        struct pollfd pfdIn{0, POLLIN, 0};
-        while (poll(&pfdIn, 1, 0) > 0 && (nread = read(0, rbuf, sizeof(rbuf))) > 0) {
-            stdinBuf.append(rbuf, nread);
-            size_t pos;
-            while ((pos = stdinBuf.find('\n')) != std::string::npos) {
-                std::string cmd = stdinBuf.substr(0, pos);
-                stdinBuf.erase(0, pos + 1);
-                cmd.erase(cmd.find_last_not_of(" \t\r\n") + 1); // trim
-                if (!cmd.empty()) {
-                    // whisper: "w <target> <msg>" 或 "w <msg>"(发给自己), 验证聊天通道
-                    if (cmd[0] == 'w' && (cmd.size() == 1 || cmd[1] == ' ')) {
-                        std::string rest = cmd.size() > 2 ? cmd.substr(2) : "";
-                        std::string target, wmsg;
-                        size_t sp = rest.find(' ');
-                        if (sp == std::string::npos) { target = chosen->name; wmsg = rest; }
-                        else { target = rest.substr(0, sp); wmsg = rest.substr(sp + 1); }
-                        if (!wmsg.empty()) {
-                            world.SendWhisper(target, wmsg);
-                            std::cout << logTag << " [Whisper->" << target << "] " << wmsg << "\n" << std::flush;
-                        }
-                    } else {
-                        world.SendChatMessage(cmd);
-                        std::cout << logTag << " [Cmd] " << cmd << "\n" << std::flush;
-                    }
-                }
-            }
-        }
-#endif
-
         if (!world.IsConnected()) {
             std::cerr << logTag << "[-] Connection lost\n";
             dumpDrop("connection_lost");
@@ -655,22 +489,6 @@ retry_login:
         // 定期发送移动心跳包, 模拟正常客户端行为(即使角色静止也持续上报移动状态)
         auto moveElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMove);
         if (moveElapsed.count() >= 2000) {
-            // If walking to a target, advance the position a bit each tick.
-            if (hasMoveTarget) {
-                Vec3 cur = world.GetMoverPos();
-                float dx = moveTarget.x - cur.x;
-                float dy = moveTarget.y - cur.y;
-                float dz = moveTarget.z - cur.z;
-                float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-                if (dist > 1.0f) {
-                    float step = 8.0f; // move ~8 yards per tick
-                    float nx = cur.x + dx / dist * step;
-                    float ny = cur.y + dy / dist * step;
-                    float nz = cur.z + dz / dist * step;
-                    world.SetMover(world.GetMoverGuid(), Vec3{nx, ny, nz}, 0.0f);
-                    std::cout << logTag << " Moved to " << nx << "," << ny << "," << nz << "\n" << std::flush;
-                }
-            }
             if (world.SendMoveHeartbeat()) {
                 if (++heartbeatCount % 3 == 0)
                     std::cout << logTag << " Move heartbeat sent (" << heartbeatCount << ")\n" << std::flush;

@@ -610,10 +610,6 @@ namespace WoWClient
         bool SendAuthSession(const AuthResult& auth, const std::string& username, uint8 realmId);
         bool WaitAuthResponse(uint8& result, uint32& billingFlags);
         bool RecvCharacterList(std::vector<CharacterInfo>& chars);
-        // Create a character (CMSG_CHAR_CREATE). Returns true on success.
-        bool CreateCharacter(const std::string& name, uint8 race, uint8 clazz,
-                             uint8 gender, uint8 skin, uint8 face,
-                             uint8 hairStyle, uint8 hairColor, uint8 facialHair);
         bool LoginCharacter(uint64 guid);
         bool WaitWorldEnter();
         bool SendActiveMover(uint64 guid);
@@ -624,10 +620,6 @@ namespace WoWClient
         uint64 GetMoverGuid() const { return moverGuid_; }
         Vec3 GetMoverPos() const { return moverPos_; }
         bool SendChatMessage(const std::string& msg, uint8 channel = 0);
-        // whisper 私聊 (验证聊天通道: whisper 给自己会被服务器回显)
-        bool SendWhisper(const std::string& target, const std::string& msg);
-        // Invite a player to the group (CMSG_GROUP_INVITE).
-        bool SendGroupInvite(const std::string& name);
         bool HasPendingData(uint32 timeoutMs);
         bool RecvPacketNonBlocking(uint16& cmd, std::vector<uint8>& payload);
 

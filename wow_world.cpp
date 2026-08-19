@@ -426,74 +426,6 @@ namespace WoWClient
         return true;
     }
 
-    bool WorldSocket::CreateCharacter(const std::string& name, uint8 race, uint8 clazz,
-                                      uint8 gender, uint8 skin, uint8 face,
-                                      uint8 hairStyle, uint8 hairColor, uint8 facialHair) {
-        // CMSG_CHAR_CREATE payload:
-        //   name (CString), race, class, gender, skin, face, hairStyle,
-        //   hairColor, facialHair, outfitId (byte)
-        std::vector<uint8> payload;
-        payload.insert(payload.end(), name.begin(), name.end());
-        payload.push_back(0); // null terminator
-
-        payload.push_back(race);
-        payload.push_back(clazz);
-        payload.push_back(gender);
-        payload.push_back(skin);
-        payload.push_back(face);
-        payload.push_back(hairStyle);
-        payload.push_back(hairColor);
-        payload.push_back(facialHair);
-        payload.push_back(0); // outfitId
-
-        SendPacket(CMSG_CHAR_CREATE, payload);
-        std::cout << "[World] Sent CMSG_CHAR_CREATE name=" << name
-                  << " race=" << (int)race << " class=" << (int)clazz
-                  << " gender=" << (int)gender << "\n";
-
-        // Wait for SMSG_CHAR_CREATE (0x003A). Result code in body[0]:
-        //   CHAR_CREATE_SUCCESS (0x2F) = success,
-        //   CHAR_CREATE_ERROR / FAILED / NAME_IN_USE / ... = failure
-        uint16 cmd;
-        std::vector<uint8> body;
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-        while (std::chrono::steady_clock::now() < deadline) {
-            fd_set fds;
-            FD_ZERO(&fds);
-            FD_SET(fd_, &fds);
-            struct timeval tv{0, 50000};
-            int ret = select(fd_ + 1, &fds, nullptr, nullptr, &tv);
-            if (ret < 0) {
-                if (errno == EINTR) continue;
-                return false;
-            }
-            if (ret == 0) continue;
-            if (!RecvPacket(cmd, body)) return false;
-            if (cmd == SMSG_CHAR_CREATE) break;
-        }
-
-        if (cmd != SMSG_CHAR_CREATE) {
-            std::cerr << "[World] Expected SMSG_CHAR_CREATE, got 0x"
-                      << std::hex << cmd << std::dec << "\n";
-            return false;
-        }
-
-        if (body.empty()) {
-            std::cerr << "[World] Empty SMSG_CHAR_CREATE response\n";
-            return false;
-        }
-
-        uint8 result = body[0];
-        if (result != 0x2F) { // CHAR_CREATE_SUCCESS
-            std::cerr << "[World] Character creation failed, result code=0x"
-                      << std::hex << (int)result << std::dec << "\n";
-            return false;
-        }
-
-        std::cout << "[+] Character '" << name << "' created successfully!\n";
-        return true;
-    }
-
     bool WorldSocket::LoginCharacter(uint64 guid) {
         uint8 guidBytes[8];
         writeU64LE(guidBytes, guid);
@@ -644,36 +576,6 @@ namespace WoWClient
         for (uint8 b : payload) std::cout << std::hex << int(b) << " ";
         std::cout << std::dec << "\n" << std::flush;
         std::cout << "[World] Chat sent: " << msg << "\n";
-        return true;
-    }
-
-    bool WorldSocket::SendWhisper(const std::string& target, const std::string& msg) {
-        // CMSG_MESSAGECHAT type=WHISPER(3):
-        // type(4)+lang(4)+targetName(uint8 len+text)+msg(cstring)
-        std::vector<uint8> payload;
-        auto pushU32 = [&](uint32 v) { uint8 b[4]; writeU32LE(b, v); payload.insert(payload.end(), b, b+4); };
-        pushU32(3);   // CHAT_MSG_WHISPER
-        pushU32(7);   // LANG_COMMON
-        // target name: uint8 长度前缀 (服务器 recvData >> string 用 uint8)
-        payload.push_back(uint8(target.size()));
-        payload.insert(payload.end(), target.begin(), target.end());
-        payload.insert(payload.end(), msg.begin(), msg.end());
-        payload.push_back(0);
-        if (!SendPacket(CMSG_MESSAGECHAT, payload)) return false;
-        std::cout << "[World] Whisper sent: " << target << " <- " << msg << "\n" << std::flush;
-        return true;
-    }
-
-    bool WorldSocket::SendGroupInvite(const std::string& name) {
-        // CMSG_GROUP_INVITE: name (CString) + uint32 (unused)
-        std::vector<uint8> payload;
-        payload.insert(payload.end(), name.begin(), name.end());
-        payload.push_back(0);
-        uint8 u32[4];
-        writeU32LE(u32, 0);
-        payload.insert(payload.end(), u32, u32 + 4);
-        if (!SendPacket(CMSG_GROUP_INVITE, payload)) return false;
-        std::cout << "[World] Group invite sent: " << name << "\n";
         return true;
     }
 
