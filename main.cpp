@@ -182,6 +182,27 @@ Args parseArgs(int argc, char** argv) {
 }
 
 int runLoginLoop(const Args& args) {
+    // 自动重连（合理版，遵循真实客户端机制）：
+    //  - 只在 TCP 真断(connection_lost)或连接类失败时重连；服务器明确登出则正常退出
+    //  - PONG 超时已不做任何动作(fire-and-forget)，绝不因此断线(P-013)
+    //  - 重连先重建 TCP/IP：重新走 auth→realm→world→进世界，带阶梯退避
+    static const int backoffSec[] = {5, 15, 30, 60, 60, 60};
+    const int backoffCount = (int)(sizeof(backoffSec) / sizeof(backoffSec[0]));
+    int reconnectAttempt = 0;
+
+retry_login:
+    if (!g_running) return 0;
+    if (reconnectAttempt > 0) {
+        int idx = (reconnectAttempt - 1 < backoffCount) ? (reconnectAttempt - 1) : (backoffCount - 1);
+        int waitSec = backoffSec[idx];
+        std::cerr << "\n[reconnect] attempt #" << reconnectAttempt
+                  << " (previous session dropped), reconnecting in " << waitSec << "s...\n";
+        for (int i = 0; i < waitSec && g_running; ++i)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (!g_running) return 0;
+    }
+    ++reconnectAttempt;
+
     std::cout << "\n========================================\n";
     std::cout << "  WoW Standalone Client Simulator\n";
     std::cout << "========================================\n\n";
@@ -198,20 +219,20 @@ int runLoginLoop(const Args& args) {
     AuthSocket auth;
     if (!auth.Connect(args.host, args.port)) {
         std::cerr << "[-] Auth connection failed\n";
-        return 1;
+        goto retry_login;   // 连接类失败 → 重建 TCP 重连
     }
 
     if (!auth.Login(args.account, args.password)) {
         std::cerr << "[-] Auth login failed\n";
         auth.Disconnect();
-        return 1;
+        goto retry_login;   // 认证失败(含服务器临时不可用) → 重连(保留日志便于诊断)
     }
 
     std::vector<RealmInfo> realms;
     if (!auth.FetchRealmList(realms)) {
         std::cerr << "[-] No realms available\n";
         auth.Disconnect();
-        return 1;
+        goto retry_login;   // 连接类失败 → 重连
     }
 
     std::cout << "[+] Auth login successful!\n";
@@ -244,24 +265,24 @@ int runLoginLoop(const Args& args) {
 
     if (!world.Connect()) {
         std::cerr << "[-] World connection failed\n";
-        return 1;
+        goto retry_login;   // 连接类失败 → 重建 TCP 重连
     }
 
     if (!world.RecvAuthChallenge()) {
         std::cerr << "[-] Auth challenge failed\n";
-        return 1;
+        goto retry_login;   // 连接类失败 → 重连
     }
 
     if (!world.SendAuthSession(authResult, args.account, realm.realmId)) {
         std::cerr << "[-] Auth session send failed\n";
-        return 1;
+        goto retry_login;   // 连接类失败 → 重连
     }
 
     uint8 authResp;
     uint32 billingFlags;
     if (!world.WaitAuthResponse(authResp, billingFlags)) {
         std::cerr << "[-] Auth response failed: " << (int)authResp << "\n";
-        return 1;
+        goto retry_login;   // 连接类失败 → 重连
     }
 
     if (!isAuthResponseOk(authResp)) {
@@ -291,7 +312,7 @@ int runLoginLoop(const Args& args) {
     std::vector<CharacterInfo> chars;
     if (!world.RecvCharacterList(chars)) {
         std::cerr << "[-] Failed to get character list\n";
-        return 1;
+        goto retry_login;   // 连接类失败 → 重建 TCP 重连
     }
 
     // action=create: 如果账号没有角色（或想新建），发送 CMSG_CHAR_CREATE 建一个，
@@ -360,12 +381,12 @@ int runLoginLoop(const Args& args) {
     // ---- Step 4: 进入世界 ----
     if (!world.LoginCharacter(chosen->guid)) {
         std::cerr << "[-] Character login failed\n";
-        return 1;
+        goto retry_login;   // 连接类失败 → 重建 TCP 重连
     }
 
     if (!world.WaitWorldEnter()) {
         std::cerr << "[-] Failed to enter world\n";
-        return 1;
+        goto retry_login;   // 连接类失败 → 重建 TCP 重连
     }
 
     world.SendActiveMover(chosen->guid);
@@ -381,7 +402,7 @@ int runLoginLoop(const Args& args) {
         if (!world.RecvPacketNonBlocking(cmd, payload)) break;
         if (cmd == SMSG_LOGOUT_COMPLETE) {
             std::cerr << "[-] Kicked during login\n";
-            return 1;
+            goto retry_login;   // 进世界被踢(可能是旧会话占用) → 重连
         }
         if (cmd == SMSG_TIME_SYNC_REQ && payload.size() >= 4) {
             world.SendTimeSyncResponse(readU32LE(payload.data()));
@@ -587,22 +608,23 @@ int runLoginLoop(const Args& args) {
         }
 
         // 异步 Ping 状态机: 每 30 秒发 CMSG_PING, 主循环收包检测 SMSG_PONG。
-        // 发送后 10 秒未收到 PONG 判失败; 连续 3 次失败主动断线(ping_timeout)。
-        // 旧实现 SendPing 内同步等 PONG 会吞掉位置更新包 (P-013 掉线根因), 已废弃。
+        // 原则（遵循真实客户端 fire-and-forget 机制，杜绝"TCP 没断却自断"）：
+        //   - 只负责发 ping；PONG 收到与否只记日志，绝不因 PONG 未到主动断线
+        //   - 服务器判活只看 client 是否持续发 CMSG_PING（HandlePing 更新 _LastPingTime），
+        //     PONG 未及时收到不代表连接有问题（位置更新风暴会使 recv-q 积压、PONG 排队延迟）
+        //   - TCP 真断统一由主循环 IsConnected() 检测（connection_lost）处理，PONG 超时
+        //     不属于断线（P-013 根因：同步等待/超时判定误判主动断）
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPing);
         if (!pingAwait) {
             if (elapsed.count() >= 30000) {
                 if (world.SendPing(pingSeq++)) {
                     pingAwait = true;
                     pongOk = false;
-                    lastPing = now;   // 记录发送时刻, 用于超时判定
+                    lastPing = now;   // 记录发送时刻, 用于超时提示
                 } else {
-                    pingFailCount++;
-                    std::cerr << logTag << "[-] Ping send failed (" << pingFailCount << "/3)\n";
-                    if (pingFailCount >= 3) {
-                        dumpDrop("ping_timeout");
-                        break;
-                    }
+                    // SendPing 发送失败: 仅提示, 不断线。
+                    // TCP 若真断, 下一次 recv 会失败, 由 connection_lost 统一处理。
+                    std::cerr << logTag << "[-] Ping send failed (ignored)\n";
                     lastPing = now;
                 }
             }
@@ -615,13 +637,11 @@ int runLoginLoop(const Args& args) {
             strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", localtime(&timeT));
             std::cout << "[" << timeBuf << "] Ping OK (seq=" << pingSeq - 1 << ")\n";
         } else if (elapsed.count() >= 30000 + 10000) {
-            // 发送后 10 秒仍未收到 PONG → 本次 ping 超时
-            pingFailCount++;
-            std::cerr << logTag << "[-] Ping timeout (seq=" << pingSeq - 1 << ", " << pingFailCount << "/3)\n";
-            if (pingFailCount >= 3) {
-                dumpDrop("ping_timeout");
-                break;
-            }
+            // PONG 超时(10s): 保留日志, 但不做任何动作（不断线/不重连/不 dumpDrop）。
+            // 遵循真实客户端 fire-and-forget 机制: PONG 未及时收到不代表连接异常
+            // （位置更新风暴会使 recv-q 积压、PONG 在缓冲排队延迟）。P-013 根因修复。
+            std::cerr << logTag << "[-] Ping timeout (seq=" << pingSeq - 1 << ", no action)\n";
+            pingFailCount = 0;
             pingAwait = false;   // 允许重新发送
             lastPing = now;
         }
@@ -630,8 +650,12 @@ int runLoginLoop(const Args& args) {
     }
 
     world.Disconnect();
-    std::cout << "\n[+] Client disconnected. Goodbye!\n";
-    return 0;
+
+    // 走到这里 = TCP 真断(connection_lost, 主循环 break)。
+    // server_kick_logout(服务器明确登出)已在主循环内正常 return 0, 不会到这里。
+    // 遵循合理自动重连: 只在 TCP 真断时重连, 先重建 TCP/IP(重新走 auth→world→进世界)。
+    std::cout << "\n[+] Session ended (connection lost), will reconnect.\n";
+    goto retry_login;
 }
 
 int main(int argc, char** argv) {
