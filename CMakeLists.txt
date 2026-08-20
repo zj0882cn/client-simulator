@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
 project(wow_client_simulator LANGUAGES CXX)
 
+# 未指定构建类型时默认 Release：下载源码后 cmake .. && make 即得到发布版。
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    message(STATUS "CMAKE_BUILD_TYPE not set, defaulting to Release")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
