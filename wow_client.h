@@ -200,6 +200,8 @@ namespace WoWClient
     constexpr uint16 SMSG_NEW_WORLD         = 0x003E;
     constexpr uint16 SMSG_TRANSFER_PENDING  = 0x003F;
     constexpr uint16 SMSG_TRANSFER_ABORTED = 0x0040;
+    constexpr uint16 MSG_MOVE_TELEPORT      = 0x00C5;
+    constexpr uint16 MSG_MOVE_TELEPORT_ACK  = 0x00C7;
     constexpr uint16 SMSG_TIME_SYNC_REQ     = 0x0390;
     constexpr uint16 SMSG_MESSAGE_CHAT      = 0x0096;
     constexpr uint16 SMSG_GM_MESSAGECHAT    = 0x3B3;

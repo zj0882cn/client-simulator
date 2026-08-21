@@ -414,6 +414,38 @@ retry_login:
                 pongOk = true;
                 pingAwait = false;
             }
+            // 服务器位置同步：SMSG_NEW_WORLD（跨地图传送 / GM 召唤）
+            // 读取服务器发来的新位置 → 更新 moverPos_ → 心跳跟随发新位置
+            if (cmd == SMSG_NEW_WORLD && payload.size() >= 20) {
+                uint32 newMap = readU32LE(payload.data());
+                float nx, ny, nz, no;
+                memcpy(&nx, payload.data() + 4, 4);
+                memcpy(&ny, payload.data() + 8, 4);
+                memcpy(&nz, payload.data() + 12, 4);
+                memcpy(&no, payload.data() + 16, 4);
+                uint64 mg = world.GetMoverGuid();
+                world.SetMover(mg, Vec3{nx, ny, nz}, no);
+                std::cout << logTag << " [Position] SMSG_NEW_WORLD map=" << newMap
+                          << " → 新位置 (" << nx << "," << ny << "," << nz << ")\n" << std::flush;
+            }
+            // 服务器位置同步：MSG_MOVE_TELEPORT_ACK（同地图传送 / GM 召唤）
+            // 服务器 SendTeleportAckPacket: packed guid + uint32(传送序号) + BuildMovementPacket
+            // MovementInfo(flags4 + flags2 2 + time4 + xyz+o16) 位置 offset = guidLen + 4(序号) + 10 = guidLen + 14
+            if (cmd == MSG_MOVE_TELEPORT_ACK) {
+                int consumed = 0;
+                uint64 tguid = readPackedGuid(payload.data(), consumed);
+                int off = consumed + 14;  // uint32序号(4) + flags(4) + flags2(2) + time(4)
+                if (tguid == world.GetMoverGuid() && payload.size() >= off + 16) {
+                    float nx, ny, nz, no;
+                    memcpy(&nx, payload.data() + off, 4);
+                    memcpy(&ny, payload.data() + off + 4, 4);
+                    memcpy(&nz, payload.data() + off + 8, 4);
+                    memcpy(&no, payload.data() + off + 12, 4);
+                    world.SetMover(tguid, Vec3{nx, ny, nz}, no);
+                    std::cout << logTag << " [Position] MSG_MOVE_TELEPORT_ACK → 新位置 ("
+                              << nx << "," << ny << "," << nz << ")\n" << std::flush;
+                }
+            }
             // 打印服务器聊天消息（.bot 命令返回等）, 便于测试验证
             if (cmd == SMSG_MESSAGE_CHAT) {
                 std::cout << "[DBG] SMSG_MESSAGE_CHAT size=" << payload.size() << "\n" << std::flush;
