@@ -528,13 +528,28 @@ namespace WoWClient
 
         std::vector<uint8> payload;
         auto pushU32 = [&](uint32 v) { uint8 b[4]; writeU32LE(b, v); payload.insert(payload.end(), b, b+4); };
+        auto pushU16 = [&](uint16 v) { uint8 b[2]; writeU16LE(b, v); payload.insert(payload.end(), b, b+2); };
         auto pushF32 = [&](float f) { uint8 b[4]; writeU32LE(b, *reinterpret_cast<uint32*>(&f)); payload.insert(payload.end(), b, b+4); };
 
-        uint8 guidBuf[8];
-        writeU64LE(guidBuf, moverGuid_);
-        payload.insert(payload.end(), guidBuf, guidBuf + 8);
+        // 3.3.5 movement opcode 的 guid 用 packed 格式（服务器 readPackGUID）：
+        // 首字节 guidmark（bit i=1 表示第 i 字节存在）+ 按序输出非零字节。
+        // 例如 guid=17(0x11) → [0x01][0x11]；旧版 writeU64LE 原始 8 字节
+        // 会让 readPackGUID 解析错乱 → 位置永不更新。
+        uint64 raw = moverGuid_;
+        uint8 guidmark = 0;
+        uint8 gbytes[8];
+        for (int i = 0; i < 8; ++i) {
+            gbytes[i] = uint8((raw >> (i * 8)) & 0xFF);
+            if (gbytes[i]) guidmark |= (uint8(1) << i);
+        }
+        payload.push_back(guidmark);
+        for (int i = 0; i < 8; ++i)
+            if (gbytes[i]) payload.push_back(gbytes[i]);
 
-        pushU32(0);  // MOVEMENTFLAG_NONE
+        pushU32(0);  // MOVEMENTFLAG_NONE (flags)
+        pushU16(0);  // flags2 —— 服务器 MovementInfo::flags2 是 uint16（2 字节）！
+                     // 缺了/多字节都会让服务器 ReadMovementInfo 按
+                     // flags(4)+flags2(2)+time(4) 读错位 → time/pos 错乱 → 位置不更新。
         uint32 moveTime = uint32(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count() & 0xFFFFFFFF);
         pushU32(moveTime);
